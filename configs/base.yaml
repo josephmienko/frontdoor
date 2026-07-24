@@ -1,7 +1,0 @@
-door:
-  unlock_seconds: 5.0
-hardware:
-  card_source: simulated
-  exit_button: simulated
-  relay: simulated
-

@@ -2,11 +2,11 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Check local config",
+      "name": "Run simulated vertical slice",
       "type": "debugpy",
       "request": "launch",
-      "module": "access_control",
-      "args": ["check-config", "--config", "configs/local.yaml"]
+      "module": "bridgewire",
+      "args": ["simulate", "--config", "configs/simulation.toml"]
     }
   ]
 }

@@ -1,48 +1,70 @@
 # Bridgewire access control
 
-A simulator-first Python service for modernizing the Bridgewire door controller.
-The domain code depends only on injected protocols; GPIO and reader hardware are
-intentionally outside this first milestone.
+This repository contains the first, entirely simulated vertical slice of the
+replacement Bridgewire door controller. It strictly parses the documented
+ID-20LA serial format, validates the legacy `KEY,NAME,ALLOW` authorization
+shape, drives a non-blocking controller against a simulated BCM23 relay, emits
+privacy-safe audit events, escalates suspicious activity, and models reader
+discovery and recovery. It contains no Raspberry Pi GPIO adapter, live
+credential data, notification endpoint, or remote-unlock feature.
 
 ## Quick start
 
-Requires Python 3.11+ and [`uv`](https://docs.astral.sh/uv/).
+Install Python 3.13 and
+[Poetry 2.4](https://python-poetry.org/docs/#installation), then:
 
-```console
-uv sync --all-groups
-uv run access-control version
-uv run access-control check-config --config configs/local.yaml
-uv run pytest
-uv run ruff format --check .
-uv run ruff check .
-uv run pyright
+```powershell
+poetry env use 3.13
+poetry install --with dev
+poetry run bridgewire version
+poetry run bridgewire simulate --config configs/simulation.toml
+```
+
+Run the complete local quality gate:
+
+```powershell
+poetry run ruff format --check .
+poetry run ruff check .
+poetry run mypy .
+poetry run pytest --cov=bridgewire --cov-branch --cov-report=term-missing
+poetry build
+```
+
+Docker is optional and runs only the sanitized simulator:
+
+```powershell
 docker compose up --build
 ```
 
 On a new Windows development machine, the optional RP4 SSH setup script can
-create the local `.env` file, configure a dedicated SSH key, install its public
-key on the RP4, and verify key-based access:
+create `.env`, configure a dedicated SSH key, install its public key on the
+RP4, and verify key-based access:
 
 ```powershell
 .\setup-rp4-ssh.ps1
 ```
 
-The Compose service runs only configuration validation and cannot energize a relay.
+The VS Code interpreter is `.venv/Scripts/python.exe`. If Poetry creates an
+environment elsewhere, set `POETRY_VIRTUALENVS_IN_PROJECT=true`, remove only
+the project environment, and rerun `poetry install`.
 
-## Safety boundary
+## Design and safety
 
-Only simulated adapters exist in this revision. No GPIO, USB, serial, production
-configuration, credentials, VPN material, or card database is included. The exit
-request is handled independently of card-reader health and repository access.
+The core depends on typed interfaces and an injected monotonic clock. Tests
+never wait in real time. Startup explicitly commands BCM23 LOW before
+credential handling; shutdown attempts LOW before cleanup. HIGH is requested
+only for an authorized credential, for an original three-second deadline that
+cannot be extended by subsequent credentials.
 
-## Hardware questions that must be answered before hardware adapters are added
+Reader inactivity is telemetry only. It is not treated as proof of failure.
+Raw credential identifiers, names, secrets, and webhook values are excluded
+from routine audit data.
 
-- Reader transport and exact output (serial, HID keyboard, Wiegand, or other)
-- Relay input voltage, contact behavior, and active polarity
-- Whether the magnetic lock is fail-safe or fail-secure
-- Whether egress is directly wired, software driven, or both
-- Legacy OS/runtime, VPN setup, credential storage, and failure mechanism
-- Lock and relay power supplies, and the sensitivity classification of card IDs
+See [the increment architecture](docs/increment-1-architecture.md),
+[reader contract](docs/reader-contract.md), and
+[requirements traceability](docs/requirements-traceability.md).
 
-Unidentified boards must be inspected and measured before connection. A harmless
-bench load must be used before any facility lock is connected.
+## Contributions and releases
+
+Use Conventional Commits, for example `feat: add simulated reader recovery`.
+CI must pass before `main` can release. See [releasing](docs/releasing.md).

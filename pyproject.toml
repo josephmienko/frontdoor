@@ -1,57 +1,71 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
 name = "bridgewire-access-control"
-version = "0.1.0"
-description = "Simulator-first access-control service"
+version = "0.2.0"
+description = "Simulator-first replacement for the Bridgewire access-control service"
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = ["PyYAML>=6.0.2"]
+requires-python = ">=3.13,<3.14"
+authors = [{ name = "Joe Mienko", email = "joseph.mienko@gmail.com" }]
+dependencies = [
+    "jsonschema>=4.25,<5",
+]
 
 [project.scripts]
-access-control = "access_control.cli:main"
+bridgewire = "bridgewire.cli:main"
 
-[dependency-groups]
-test = [
-    "hypothesis>=6.0",
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "pytest-cov>=6.0",
-]
-quality = [
-    "pyright>=1.1",
-    "ruff>=0.9",
-]
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/access_control"]
+[tool.poetry]
+packages = [{ include = "bridgewire", from = "src" }]
+
+[tool.poetry.group.dev.dependencies]
+mypy = "^1.18"
+pytest = "^8.4"
+pytest-cov = "^7.0"
+ruff = "^0.14"
+python-semantic-release = "^10.5"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = "jsonschema.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-addopts = "--strict-markers --cov=access_control --cov-report=term-missing"
-asyncio_mode = "strict"
+addopts = "--strict-markers"
 testpaths = ["tests"]
 markers = [
     "unit: fast isolated tests",
     "integration: tests involving multiple components",
-    "simulation: operational scenario tests",
-    "docker: tests requiring Docker",
+    "failure_mode: simulated operational failure tests",
     "hardware: tests requiring Raspberry Pi hardware",
-    "relay: tests that may energize a relay",
-    "production_safe: tests safe to run against production",
-    "slow: slower tests",
 ]
 
-[tool.ruff]
-line-length = 100
-target-version = "py311"
+[tool.coverage.run]
+branch = true
+source = ["bridgewire"]
 
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
 
-[tool.pyright]
-include = ["src", "tests"]
-pythonVersion = "3.11"
-typeCheckingMode = "strict"
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+branch = "main"
+tag_format = "v{version}"
+commit_parser = "conventional"
+build_command = "poetry build"
 
+[tool.semantic_release.changelog]
+changelog_file = "CHANGELOG.md"

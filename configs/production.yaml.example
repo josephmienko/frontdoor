@@ -1,8 +1,0 @@
-# Copy to /etc/access-control/config.yaml and fill in only after hardware discovery.
-door:
-  unlock_seconds: 5.0
-hardware:
-  card_source: REQUIRES_INVESTIGATION
-  exit_button: REQUIRES_INVESTIGATION
-  relay: REQUIRES_INVESTIGATION
-

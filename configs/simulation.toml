@@ -1,0 +1,29 @@
+[reader]
+by_id_path = "/dev/serial/by-id/bridgewire-simulated-reader"
+
+[serial]
+baud_rate = 9600
+data_bits = 8
+parity = "none"
+stop_bits = 1
+timeout_seconds = 1.0
+maximum_record_bytes = 16
+
+[gpio]
+numbering = "BCM"
+channel = 23
+normal_high = false
+release_high = true
+release_seconds = 3.0
+
+[reconnect]
+minimum_seconds = 1.0
+maximum_seconds = 30.0
+jitter = 0.0
+
+[escalation]
+warning_count = 3
+warning_window_seconds = 60.0
+critical_count = 5
+critical_window_seconds = 300.0
+reset_after_seconds = 900.0

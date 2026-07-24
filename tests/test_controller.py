@@ -1,79 +1,149 @@
+from __future__ import annotations
+
 import pytest
 
-from access_control.controller import AccessController
-from access_control.models import AccessDecision
-from access_control.simulators import (
-    InMemoryCardRepository,
-    InMemoryEventStore,
-    SimulatedClock,
-    SimulatedRelay,
+from bridgewire.audit import EventType, InMemoryAuditSink, InMemoryNotificationQueue
+from bridgewire.authorization import AuthorizationOutcome
+from bridgewire.clock import ManualClock
+from bridgewire.controller import (
+    AccessController,
+    ControllerState,
+    PhysicalReleaseStatus,
 )
+from bridgewire.gpio import RelayActionType, SimulatedRelay
+from bridgewire.reader import MalformedRecord, ParsedRecord
 
-
-def make_controller(
-    authorized_cards: set[str] | None = None,
-) -> tuple[AccessController, SimulatedRelay, InMemoryEventStore]:
-    clock = SimulatedClock()
-    relay = SimulatedRelay(clock)
-    events = InMemoryEventStore()
-    controller = AccessController(
-        repository=InMemoryCardRepository(authorized_cards or set()),
-        relay=relay,
-        events=events,
-        clock=clock,
-        unlock_seconds=2.5,
-    )
-    return controller, relay, events
+System = tuple[
+    AccessController,
+    ManualClock,
+    SimulatedRelay,
+    InMemoryAuditSink,
+    InMemoryNotificationQueue,
+]
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_authorized_card_activates_relay_and_records_masked_event() -> None:
-    controller, relay, events = make_controller({"secret-card"})
-
-    decision = await controller.handle_card("secret-card")
-
-    assert decision is AccessDecision.GRANTED
-    assert len(relay.activations) == 1
-    assert relay.activations[0].requested_duration == 2.5
-    assert relay.is_safe
-    assert events.events[0].name == "access_granted"
-    assert events.events[0].fields["card_token"] != "secret-card"
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_unauthorized_card_does_not_activate_relay() -> None:
-    controller, relay, events = make_controller()
-
-    decision = await controller.handle_card("unknown")
-
-    assert decision is AccessDecision.DENIED
-    assert relay.activations == []
-    assert relay.is_safe
-    assert events.events[0].name == "access_denied"
+def test_startup_explicitly_commands_low_before_ready(system: System) -> None:
+    controller, _clock, relay, audit, _notifications = system
+    controller.start()
+    assert [action.action for action in relay.actions] == [
+        RelayActionType.SETUP,
+        RelayActionType.LOW,
+    ]
+    assert relay.numbering == "BCM"
+    assert relay.channel == 23
+    assert controller.state is ControllerState.READY
+    assert audit.events[-1].event_type is EventType.SERVICE_STARTED
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_exit_button_activates_relay_without_repository_or_reader() -> None:
-    controller, relay, events = make_controller()
-
-    await controller.handle_exit_button()
-
-    assert len(relay.activations) == 1
-    assert relay.is_safe
-    assert events.events[0].name == "exit_button"
+def test_authorized_release_is_non_blocking_and_restored_at_deadline(system: System) -> None:
+    controller, clock, relay, audit, _notifications = system
+    controller.start()
+    result = controller.process(ParsedRecord("0102030405"))
+    assert result.authorization is AuthorizationOutcome.AUTHORIZED
+    assert result.physical_release is PhysicalReleaseStatus.ASSERTED
+    assert relay.is_high
+    assert controller.release_deadline == 3
+    clock.advance(2.999)
+    controller.tick()
+    assert relay.is_high
+    clock.advance(0.001)
+    controller.tick()
+    assert not relay.is_high
+    assert audit.events[-1].event_type is EventType.RELAY_RESTORED
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_startup_and_shutdown_restore_safe_state() -> None:
-    controller, relay, _ = make_controller()
-    relay.simulate_unsafe_state()
+def test_second_authorized_credential_does_not_extend_deadline(system: System) -> None:
+    controller, clock, relay, audit, _notifications = system
+    controller.start()
+    controller.process(ParsedRecord("0102030405"))
+    original_deadline = controller.release_deadline
+    clock.advance(1)
+    result = controller.process(ParsedRecord("0102030405"))
+    assert result.physical_release is PhysicalReleaseStatus.ALREADY_RELEASED
+    assert controller.release_deadline == original_deadline
+    assert [action.action for action in relay.actions].count(RelayActionType.HIGH) == 1
+    assert [event.event_type for event in audit.events].count(EventType.CREDENTIAL_AUTHORIZED) == 2
 
-    await controller.start()
-    assert relay.is_safe
-    relay.simulate_unsafe_state()
-    await controller.stop()
-    assert relay.is_safe
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("record", "expected_event"),
+    [
+        (ParsedRecord("1112131415"), EventType.CREDENTIAL_DENIED),
+        (ParsedRecord("FFFFFFFFFF"), EventType.CREDENTIAL_UNKNOWN),
+        (MalformedRecord("invalid_encoding"), EventType.MALFORMED_RECORD),
+    ],
+)
+def test_non_authorized_records_never_assert_high(
+    system: System, record: ParsedRecord | MalformedRecord, expected_event: EventType
+) -> None:
+    controller, _clock, relay, audit, _notifications = system
+    controller.start()
+    controller.process(record)
+    assert RelayActionType.HIGH not in [action.action for action in relay.actions]
+    assert audit.events[-1].event_type is expected_event
+
+
+@pytest.mark.unit
+def test_denied_unknown_and_malformed_are_processed_during_release(system: System) -> None:
+    controller, _clock, _relay, audit, _notifications = system
+    controller.start()
+    controller.process(ParsedRecord("0102030405"))
+    controller.process(ParsedRecord("1112131415"))
+    controller.process(ParsedRecord("FFFFFFFFFF"))
+    controller.process(MalformedRecord("checksum_mismatch"))
+    credential_events = [
+        event.event_type
+        for event in audit.events
+        if event.event_type
+        in {
+            EventType.CREDENTIAL_DENIED,
+            EventType.CREDENTIAL_UNKNOWN,
+            EventType.MALFORMED_RECORD,
+        }
+    ]
+    assert credential_events == [
+        EventType.CREDENTIAL_DENIED,
+        EventType.CREDENTIAL_UNKNOWN,
+        EventType.MALFORMED_RECORD,
+    ]
+
+
+@pytest.mark.unit
+def test_graceful_shutdown_commands_low_then_cleanup(system: System) -> None:
+    controller, _clock, relay, audit, _notifications = system
+    controller.start()
+    controller.process(ParsedRecord("0102030405"))
+    controller.shutdown()
+    assert [action.action for action in relay.actions][-2:] == [
+        RelayActionType.LOW,
+        RelayActionType.CLEANUP,
+    ]
+    assert controller.state is ControllerState.STOPPED
+    assert audit.events[-1].event_type is EventType.SERVICE_SHUTDOWN
+
+
+@pytest.mark.failure_mode
+def test_failed_high_is_not_reported_as_physical_release(system: System) -> None:
+    controller, _clock, relay, audit, _notifications = system
+    controller.start()
+    relay.fail_next_high = True
+    result = controller.process(ParsedRecord("0102030405"))
+    assert result.authorization is AuthorizationOutcome.AUTHORIZED
+    assert result.physical_release is PhysicalReleaseStatus.ACTUATION_FAILED
+    assert not relay.is_high
+    assert controller.state is ControllerState.FAULTED
+    assert audit.events[-1].event_type is EventType.RELAY_CONTROL_ERROR
+
+
+@pytest.mark.failure_mode
+def test_recoverable_failure_attempts_immediate_low(system: System) -> None:
+    controller, _clock, relay, _audit, _notifications = system
+    controller.start()
+    controller.process(ParsedRecord("0102030405"))
+    controller.recoverable_failure()
+    assert not relay.is_high
+    assert relay.actions[-1].action is RelayActionType.LOW

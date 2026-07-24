@@ -1,6 +1,5 @@
 services:
   access-control:
     build: .
-    command: ["check-config", "--config", "configs/local.yaml"]
+    command: ["simulate", "--config", "configs/simulation.toml"]
     restart: "no"
-

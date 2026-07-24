@@ -4,11 +4,10 @@
     {
       "label": "test",
       "type": "process",
-      "command": "uv",
-      "args": ["run", "pytest"],
+      "command": "poetry",
+      "args": ["run", "pytest", "--cov=bridgewire", "--cov-branch"],
       "group": "test",
       "problemMatcher": []
     }
   ]
 }
-

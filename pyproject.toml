@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bridgewire-access-control"
+version = "0.1.0"
+description = "Simulator-first access-control service"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6.0.2"]
+
+[project.scripts]
+access-control = "access_control.cli:main"
+
+[dependency-groups]
+test = [
+    "hypothesis>=6.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+]
+quality = [
+    "pyright>=1.1",
+    "ruff>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/access_control"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --cov=access_control --cov-report=term-missing"
+asyncio_mode = "strict"
+testpaths = ["tests"]
+markers = [
+    "unit: fast isolated tests",
+    "integration: tests involving multiple components",
+    "simulation: operational scenario tests",
+    "docker: tests requiring Docker",
+    "hardware: tests requiring Raspberry Pi hardware",
+    "relay: tests that may energize a relay",
+    "production_safe: tests safe to run against production",
+    "slow: slower tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+

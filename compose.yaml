@@ -1,0 +1,6 @@
+services:
+  access-control:
+    build: .
+    command: ["check-config", "--config", "configs/local.yaml"]
+    restart: "no"
+

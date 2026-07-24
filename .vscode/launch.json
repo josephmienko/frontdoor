@@ -1,0 +1,12 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Check local config",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "access_control",
+      "args": ["check-config", "--config", "configs/local.yaml"]
+    }
+  ]
+}

@@ -9,8 +9,10 @@ uses installed package metadata, and python-semantic-release updates the
 project version, changelog, tag, and GitHub release.
 
 Pull requests run formatting, lint, strict typing, tests with coverage, build,
-container build, and secret scan. The release job is gated on those jobs and
-runs only for a push to `main`. Configure `main` as a protected branch and
+container build, and secret scan. Passing pushes retain `coverage.xml` and
+`pytest-results.xml`; the release uploads those alongside the wheel and source
+archive as the known-good baseline. The release job is gated on those jobs and
+runs only for a push to `master`. Configure `master` as a protected branch and
 require `checks` and `secret-scan`; releases are never published from pull
 requests. The workflow needs repository `contents: write` only in its release
 job.

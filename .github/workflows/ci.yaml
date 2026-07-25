@@ -22,9 +22,22 @@ jobs:
       - run: poetry run ruff format --check .
       - run: poetry run ruff check .
       - run: poetry run mypy .
-      - run: poetry run pytest --cov=bridgewire --cov-branch --cov-report=term-missing
+      - run: >-
+          poetry run pytest
+          --cov=bridgewire
+          --cov-branch
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+          --junitxml=pytest-results.xml
       - run: poetry build
       - run: docker build .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: known-good-evidence
+          path: |
+            coverage.xml
+            pytest-results.xml
+          if-no-files-found: error
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -37,7 +50,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: [checks, secret-scan]
     runs-on: ubuntu-latest
     permissions:
@@ -51,6 +64,10 @@ jobs:
           python-version: "3.13"
       - run: pipx install poetry==2.4.1
       - run: pipx install python-semantic-release==10.5.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: known-good-evidence
+          path: dist
       - run: semantic-release version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

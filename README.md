@@ -69,6 +69,9 @@ the OS, see [RP4 bench restoration](docs/rp4-bench-bootstrap.md). The bootstrap
 validates the OS, architecture, Python version, and released wheel checksum;
 it does not configure physical access-control hardware.
 
+The deferred supervised-hardware deployment and validation work is recorded in
+the [after-hours hardware-service checklist](docs/after-hours-hardware-service-checklist.md).
+
 ## Contributions and releases
 
 Use Conventional Commits, for example `feat: add simulated reader recovery`.

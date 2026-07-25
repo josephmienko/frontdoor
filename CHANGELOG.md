@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.1 (2026-07-25)
+
+### Bug Fixes
+
+- Allow service user to execute versioned environment
+  ([`245c431`](https://github.com/josephmienko/frontdoor/commit/245c431521392ce71091c43aa2fc1d8827496858))
+
+
 ## v1.1.0 (2026-07-25)
 
 ### Features

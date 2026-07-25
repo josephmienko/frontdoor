@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-07-25)
+
+### Features
+
+- Add supervised hardware access service
+  ([`2f8b1c4`](https://github.com/josephmienko/frontdoor/commit/2f8b1c4d4fd241c85a555c50384573754e017cb2))
+
+
 ## v1.1.1 (2026-07-25)
 
 ### Bug Fixes

@@ -155,6 +155,8 @@ fi
 run "$venv_dir/bin/python" -m pip install --disable-pip-version-check \
   "$release_dir/$wheel_name"
 run "$venv_dir/bin/bridgewire" version
+run chgrp -R bridgewire "$venv_dir"
+run chmod -R g+rX,o-rwx "$venv_dir"
 run ln -sfn "$release_dir" "$base_dir/current.new"
 run mv -Tf "$base_dir/current.new" "$base_dir/current"
 run ln -sfn "$venv_dir" "$base_dir/current-venv.new"

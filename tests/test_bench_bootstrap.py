@@ -20,6 +20,8 @@ def test_bench_bootstrap_is_safe_and_versioned() -> None:
     assert "serve-simulated" in script
     assert "NoNewPrivileges=true" in script
     assert "ProtectSystem=strict" in script
+    assert 'chgrp -R bridgewire "$venv_dir"' in script
+    assert 'chmod -R g+rX,o-rwx "$venv_dir"' in script
     assert "private key" not in script.lower()
 
 

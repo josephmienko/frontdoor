@@ -226,5 +226,6 @@ EOF
   fi
   run install -o root -g root -m 0644 "$unit" /etc/systemd/system/bridgewire.service
   run systemctl daemon-reload
-  run systemctl enable --now bridgewire.service
+  run systemctl enable bridgewire.service
+  run systemctl restart bridgewire.service
 fi

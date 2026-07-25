@@ -33,3 +33,4 @@ def test_bench_bootstrap_service_is_explicitly_opt_in() -> None:
     assert marker in script
     assert "INSTALL_SERVICE=false" in script
     assert 'if "${INSTALL_SERVICE:-false}"' in script
+    assert "systemctl restart bridgewire.service" in script

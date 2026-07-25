@@ -147,3 +147,83 @@ def test_recoverable_failure_attempts_immediate_low(system: System) -> None:
     controller.recoverable_failure()
     assert not relay.is_high
     assert relay.actions[-1].action is RelayActionType.LOW
+
+
+@pytest.mark.failure_mode
+@pytest.mark.parametrize("failure", ["setup", "low"])
+def test_startup_failure_faults_without_accepting_credentials(system: System, failure: str) -> None:
+    controller, _clock, relay, audit, _notifications = system
+    if failure == "setup":
+        relay.fail_next_setup = True
+    else:
+        relay.fail_next_low = True
+    with pytest.raises(RuntimeError, match="injected"):
+        controller.start()
+    assert controller.state is ControllerState.FAULTED
+    assert audit.events[-1].correlation["reason"] == f"{failure}_failed"
+    if failure == "low":
+        assert [action.action for action in relay.actions] == [RelayActionType.SETUP]
+    with pytest.raises(RuntimeError, match="not accepting"):
+        controller.process(ParsedRecord("0102030405"))
+
+
+@pytest.mark.failure_mode
+def test_high_and_safe_low_failures_are_both_audited(system: System) -> None:
+    controller, _clock, relay, audit, _notifications = system
+    controller.start()
+    relay.fail_next_high = True
+    relay.fail_next_low = True
+    controller.process(ParsedRecord("0102030405"))
+    failures = [
+        event.correlation["reason"]
+        for event in audit.events
+        if event.event_type is EventType.RELAY_CONTROL_ERROR
+    ]
+    assert failures == ["high_failed", "low_failed"]
+    assert controller.state is ControllerState.FAULTED
+
+
+@pytest.mark.failure_mode
+def test_deadline_low_failure_leaves_controller_faulted(system: System) -> None:
+    controller, clock, relay, audit, _notifications = system
+    controller.start()
+    controller.process(ParsedRecord("0102030405"))
+    relay.fail_next_low = True
+    clock.advance(3)
+    controller.tick()
+    assert controller.state is ControllerState.FAULTED
+    assert relay.is_high
+    assert audit.events[-1].correlation["reason"] == "low_failed"
+
+
+@pytest.mark.failure_mode
+@pytest.mark.parametrize("failure", ["low", "cleanup"])
+def test_shutdown_failure_is_faulted_and_repeat_shutdown_is_safe(
+    system: System, failure: str
+) -> None:
+    controller, _clock, relay, audit, _notifications = system
+    controller.start()
+    controller.process(ParsedRecord("0102030405"))
+    if failure == "low":
+        relay.fail_next_low = True
+    else:
+        relay.fail_next_cleanup = True
+    controller.shutdown()
+    assert controller.state is ControllerState.FAULTED
+    assert audit.events[-1].correlation["reason"] == f"{failure}_failed"
+
+
+@pytest.mark.unit
+def test_start_and_shutdown_are_idempotent(system: System) -> None:
+    controller, _clock, relay, _audit, _notifications = system
+    controller.start()
+    controller.start()
+    assert [action.action for action in relay.actions].count(RelayActionType.SETUP) == 1
+    controller.shutdown()
+    action_count = len(relay.actions)
+    controller.shutdown()
+    assert len(relay.actions) == action_count
+    with pytest.raises(RuntimeError, match="not accepting"):
+        controller.process(ParsedRecord("0102030405"))
+    with pytest.raises(RuntimeError, match="restarted"):
+        controller.start()

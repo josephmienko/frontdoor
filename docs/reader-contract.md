@@ -23,3 +23,6 @@ failed, read failed, OS disconnect, reconnect scheduled, repeatedly failed,
 recovered, and record received events. Reconnect uses bounded exponential
 backoff with injectable jitter and an interruptible wait. Silence while a
 device remains connected is not a confirmed fault and never forces reconnect.
+`last_record_age` is exposed only as telemetry. Reader health remains `ready`
+during passive silence. Strict decoding can emit a sanitized malformed-record
+event, but neither that event nor parser errors carry raw bytes or identifiers.

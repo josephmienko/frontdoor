@@ -29,8 +29,13 @@ class SimulatedRelay:
         self.numbering: str | None = None
         self.fail_next_high = False
         self.fail_next_low = False
+        self.fail_next_setup = False
+        self.fail_next_cleanup = False
 
     def setup(self, *, numbering: str, channel: int) -> None:
+        if self.fail_next_setup:
+            self.fail_next_setup = False
+            raise RuntimeError("injected setup failure")
         self.numbering = numbering
         self.channel = channel
         self.actions.append(RelayAction(RelayActionType.SETUP, self._clock.monotonic(), channel))
@@ -49,6 +54,9 @@ class SimulatedRelay:
         self.actions.append(RelayAction(action, self._clock.monotonic(), self.channel))
 
     def cleanup(self) -> None:
+        if self.fail_next_cleanup:
+            self.fail_next_cleanup = False
+            raise RuntimeError("injected cleanup failure")
         if self.channel is None:
             return
         self.actions.append(

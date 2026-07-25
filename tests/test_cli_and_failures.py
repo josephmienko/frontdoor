@@ -1,23 +1,31 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
+import sys
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from bridgewire import __version__
 from bridgewire.audit import (
     AuditEvent,
     DurableNotificationQueue,
     EventType,
     InMemoryAuditSink,
     InMemoryNotificationQueue,
+    NotificationWorker,
     Severity,
 )
+from bridgewire.authorization import AuthorizationOutcome, AuthorizationStore
 from bridgewire.cli import main
 from bridgewire.clock import ManualClock
 from bridgewire.configuration import ConfigurationError, load_configuration
 from bridgewire.controller import AccessController, ControllerState
+from bridgewire.escalation import EscalationTracker
 from bridgewire.gpio import SimulatedRelay
 from bridgewire.reader import (
     BackoffPolicy,
@@ -33,7 +41,36 @@ from bridgewire.simulation import SimulatedReaderSession
 @pytest.mark.unit
 def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["version"]) == 0
-    assert capsys.readouterr().out.strip() == "0.2.0"
+    assert capsys.readouterr().out.strip() == __version__
+    assert re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", __version__)
+
+
+@pytest.mark.unit
+def test_project_and_runtime_versions_match(repo_root: Path) -> None:
+    project = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert project["project"]["version"] == __version__
+
+
+@pytest.mark.integration
+def test_resource_tests_run_outside_repository_working_directory(
+    tmp_path: Path, repo_root: Path
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(
+                repo_root / "tests" / "test_authorization.py::test_existing_csv_shape_and_outcomes"
+            ),
+            "-q",
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 @pytest.mark.integration
@@ -57,6 +94,60 @@ def test_durable_notification_is_retained_until_marked_delivered(tmp_path: Path)
     assert [item["event_id"] for item in recovered.pending()] == [event.event_id]
     recovered.mark_delivered(event.event_id)
     assert recovered.pending() == []
+
+
+@pytest.mark.failure_mode
+def test_external_delivery_failures_retain_pending_event_for_every_retry(
+    tmp_path: Path,
+) -> None:
+    class FailingEndpoint:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def deliver(self, _event: dict[str, object]) -> None:
+            self.attempts += 1
+            raise OSError("simulated endpoint unavailable")
+
+    queue = DurableNotificationQueue(tmp_path / "notifications.jsonl")
+    event = AuditEvent(EventType.ESCALATION_CRITICAL, Severity.CRITICAL, datetime.now(UTC))
+    queue.enqueue(event)
+    endpoint = FailingEndpoint()
+    worker = NotificationWorker(queue, endpoint)
+    for expected_attempts in (1, 2):
+        with pytest.raises(OSError, match="unavailable"):
+            worker.deliver_one()
+        assert endpoint.attempts == expected_attempts
+        assert [item["event_id"] for item in queue.pending()] == [event.event_id]
+
+
+@pytest.mark.failure_mode
+def test_local_queue_failure_does_not_stop_controller(
+    authorization: AuthorizationStore,
+) -> None:
+    class FailingQueue:
+        def enqueue(self, _event: AuditEvent) -> None:
+            raise OSError("simulated local queue failure")
+
+    clock = ManualClock()
+    relay = SimulatedRelay(clock)
+    audit = InMemoryAuditSink()
+    controller = AccessController(
+        authorization=authorization,
+        relay=relay,
+        audit=audit,
+        notifications=FailingQueue(),
+        clock=clock,
+        escalation=EscalationTracker(),
+    )
+    from bridgewire.reader import ParsedRecord
+
+    controller.start()
+    for credential in ("FFFFFFFFFF",) * 5:
+        controller.process(ParsedRecord(credential))
+    result = controller.process(ParsedRecord("0102030405"))
+    assert result.authorization is AuthorizationOutcome.AUTHORIZED
+    assert relay.is_high
+    assert EventType.NOTIFICATION_DELIVERY_FAILED in [event.event_type for event in audit.events]
 
 
 @pytest.mark.unit

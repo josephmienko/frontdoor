@@ -19,6 +19,16 @@ class EscalationPolicy:
     critical_window: float = 300.0
     reset_after: float = 900.0
 
+    def __post_init__(self) -> None:
+        if self.warning_count <= 0 or self.critical_count <= self.warning_count:
+            raise ValueError("escalation thresholds must be positive and increasing")
+        if (
+            self.warning_window <= 0
+            or self.critical_window < self.warning_window
+            or self.reset_after <= 0
+        ):
+            raise ValueError("escalation windows must be positive and ordered")
+
 
 class EscalationTracker:
     def __init__(self, policy: EscalationPolicy | None = None) -> None:

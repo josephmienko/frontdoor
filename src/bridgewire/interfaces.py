@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from bridgewire.audit import AuditEvent
+    from bridgewire.authorization import AuthorizationOutcome
 
 
 class Clock(Protocol):
@@ -32,7 +33,7 @@ class NotificationQueue(Protocol):
 
 
 class AuthorizationSource(Protocol):
-    def classify(self, credential: str) -> str: ...
+    def classify(self, credential: str) -> AuthorizationOutcome: ...
 
 
 class InterruptibleWaiter(Protocol):

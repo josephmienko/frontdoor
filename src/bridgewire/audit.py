@@ -8,7 +8,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from bridgewire.interfaces import Correlation
@@ -42,6 +42,25 @@ class EventType(StrEnum):
 
 
 _FORBIDDEN_KEYS = ("credential", "card", "name", "secret", "token", "webhook", "password")
+_ALLOWED_CORRELATION_KEYS = frozenset({"reason", "duration_seconds", "attempt", "event_count"})
+_ALLOWED_REASONS = frozenset(
+    {
+        "invalid_length",
+        "invalid_framing",
+        "invalid_terminator",
+        "invalid_encoding",
+        "invalid_identifier",
+        "invalid_checksum_encoding",
+        "checksum_mismatch",
+        "excessive_length",
+        "malformed_record",
+        "queue_unavailable",
+        "setup_failed",
+        "high_failed",
+        "low_failed",
+        "cleanup_failed",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +81,11 @@ class AuditEvent:
             lowered = key.lower()
             if any(forbidden in lowered for forbidden in _FORBIDDEN_KEYS):
                 raise ValueError(f"sensitive correlation key is prohibited: {key}")
+            if key not in _ALLOWED_CORRELATION_KEYS:
+                raise ValueError(f"correlation key is not allow-listed: {key}")
+        reason = self.correlation.get("reason")
+        if reason is not None and reason not in _ALLOWED_REASONS:
+            raise ValueError("correlation reason is not allow-listed")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -87,10 +111,30 @@ class InMemoryAuditSink:
 class InMemoryNotificationQueue:
     def __init__(self) -> None:
         self.events: list[AuditEvent] = []
-        self.available = True
 
     def enqueue(self, event: AuditEvent) -> None:
         self.events.append(event)
+
+
+class NotificationEndpoint(Protocol):
+    def deliver(self, event: dict[str, Any]) -> None: ...
+
+
+class NotificationWorker:
+    """Delivers one durable item; failures leave it pending for a later retry."""
+
+    def __init__(self, queue: DurableNotificationQueue, endpoint: NotificationEndpoint) -> None:
+        self._queue = queue
+        self._endpoint = endpoint
+
+    def deliver_one(self) -> bool:
+        pending = self._queue.pending()
+        if not pending:
+            return False
+        event = pending[0]
+        self._endpoint.deliver(event)
+        self._queue.mark_delivered(str(event["event_id"]))
+        return True
 
 
 class DurableNotificationQueue:

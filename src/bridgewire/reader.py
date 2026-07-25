@@ -147,7 +147,12 @@ def discover_reader(
     devices: Sequence[SerialDevice],
     identity: ReaderIdentity,
 ) -> DiscoveryResult:
-    matches = [device for device in devices if _matches(device, identity)]
+    by_id_matches = (
+        [device for device in devices if device.by_id_path == identity.by_id_path]
+        if identity.by_id_path is not None
+        else []
+    )
+    matches = by_id_matches or [device for device in devices if _matches(device, identity)]
     if not matches:
         return DiscoveryResult(DiscoveryStatus.NOT_FOUND, unrelated_count=len(devices))
     if len(matches) > 1:
@@ -173,6 +178,14 @@ class ReaderEventType(StrEnum):
     RECONNECT_REPEATEDLY_FAILED = "reconnect_repeatedly_failed"
     READER_RECOVERED = "reader_recovered"
     READER_RECORD_RECEIVED = "reader_record_received"
+    READER_RECORD_MALFORMED = "reader_record_malformed"
+
+
+class ReaderHealthState(StrEnum):
+    CONNECTING = "connecting"
+    READY = "ready"
+    DEGRADED = "degraded"
+    STOPPED = "stopped"
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +236,10 @@ class ReaderSupervisor:
         backoff: BackoffPolicy | None = None,
         repeated_failure_threshold: int = 3,
         random_unit: Callable[[], float] = lambda: 0.5,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
+        if repeated_failure_threshold <= 0:
+            raise ValueError("repeated failure threshold must be positive")
         self._identity = identity
         self._enumerate_devices = enumerate_devices
         self._open_reader = open_reader
@@ -235,14 +251,27 @@ class ReaderSupervisor:
         self._session: ReaderSession | None = None
         self._attempt = 0
         self._had_connection = False
+        self._repeated_failure_emitted = False
+        self._monotonic = monotonic
+        self._last_record_at: float | None = None
+        self.health_state = ReaderHealthState.DEGRADED
 
     @property
     def connected(self) -> bool:
         return self._session is not None
 
+    @property
+    def last_record_age(self) -> float | None:
+        if self._last_record_at is None or self._monotonic is None:
+            return None
+        return self._monotonic() - self._last_record_at
+
     def connect_until_ready(self, maximum_attempts: int) -> bool:
-        while self._attempt < maximum_attempts:
+        attempts_this_call = 0
+        while attempts_this_call < maximum_attempts:
+            attempts_this_call += 1
             self._attempt += 1
+            self.health_state = ReaderHealthState.CONNECTING
             self._emit(ReaderEvent(ReaderEventType.READER_CONNECTING, self._attempt))
             discovery = discover_reader(self._enumerate_devices(), self._identity)
             failure: ReaderEventType | None = None
@@ -253,7 +282,12 @@ class ReaderSupervisor:
             else:
                 assert discovery.device is not None
                 try:
-                    self._session = self._open_reader(discovery.device.path)
+                    session = self._open_reader(discovery.device.path)
+                    if not callable(getattr(session, "read", None)) or not callable(
+                        getattr(session, "close", None)
+                    ):
+                        raise OSError("reader opener returned an unusable session")
+                    self._session = session
                 except OSError:
                     failure = ReaderEventType.READER_OPEN_FAILED
                 else:
@@ -270,9 +304,12 @@ class ReaderSupervisor:
                         )
                     )
                     self._had_connection = True
+                    self._repeated_failure_emitted = False
+                    self.health_state = ReaderHealthState.READY
                     self._attempt = 0
                     return True
             assert failure is not None
+            self.health_state = ReaderHealthState.DEGRADED
             self._emit(
                 ReaderEvent(
                     failure,
@@ -280,8 +317,12 @@ class ReaderSupervisor:
                     unrelated_count=discovery.unrelated_count,
                 )
             )
-            if self._attempt >= self._repeated_failure_threshold:
+            if (
+                self._attempt >= self._repeated_failure_threshold
+                and not self._repeated_failure_emitted
+            ):
                 self._emit(ReaderEvent(ReaderEventType.RECONNECT_REPEATEDLY_FAILED, self._attempt))
+                self._repeated_failure_emitted = True
             delay = self._backoff.delay(self._attempt, self._random_unit())
             self._emit(ReaderEvent(ReaderEventType.RECONNECT_SCHEDULED, self._attempt, delay))
             if not self._wait(delay):
@@ -302,8 +343,19 @@ class ReaderSupervisor:
             self._disconnect()
             return None
         if data:
+            if self._monotonic is not None:
+                self._last_record_at = self._monotonic()
             self._emit(ReaderEvent(ReaderEventType.READER_RECORD_RECEIVED))
         return data
+
+    def read_records_once(self, stream: ReaderRecordStream) -> list[RecordResult]:
+        data = self.read_once()
+        if not data:
+            return []
+        results = stream.feed(data)
+        if any(isinstance(result, MalformedRecord) for result in results):
+            self._emit(ReaderEvent(ReaderEventType.READER_RECORD_MALFORMED))
+        return results
 
     def os_disconnected(self) -> None:
         if self._session is not None:
@@ -312,8 +364,10 @@ class ReaderSupervisor:
 
     def close(self) -> None:
         self._disconnect()
+        self.health_state = ReaderHealthState.STOPPED
 
     def _disconnect(self) -> None:
         if self._session is not None:
             self._session.close()
             self._session = None
+            self.health_state = ReaderHealthState.DEGRADED

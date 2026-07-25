@@ -15,17 +15,58 @@ from bridgewire.gpio import SimulatedRelay
 
 
 @pytest.fixture
-def schema() -> dict[str, object]:
-    return cast(
-        dict[str, object],
-        json.loads(Path("schemas/authorization-file/schema.json").read_text(encoding="utf-8")),
+def forbidden_values() -> tuple[str, ...]:
+    return (
+        "A1B2C3D4E5",
+        "A1-B2-C3-D4-E5",
+        "Sanitized Cardholder",
+        "https://hooks.invalid/FAKE-WEBHOOK-SECRET",
+        "FAKE-API-TOKEN-123",
+        "FAKE-USB-SERIAL-987",
     )
 
 
 @pytest.fixture
-def authorization(schema: dict[str, object]) -> AuthorizationStore:
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def tests_root(repo_root: Path) -> Path:
+    return repo_root / "tests"
+
+
+@pytest.fixture
+def fixture_root(tests_root: Path) -> Path:
+    return tests_root / "fixtures"
+
+
+@pytest.fixture
+def authorization_fixture_root(fixture_root: Path) -> Path:
+    return fixture_root / "authorization"
+
+
+@pytest.fixture
+def schema_root(repo_root: Path) -> Path:
+    return repo_root / "schemas"
+
+
+@pytest.fixture
+def schema(schema_root: Path) -> dict[str, object]:
+    return cast(
+        dict[str, object],
+        json.loads(
+            (schema_root / "authorization-file" / "schema.json").read_text(encoding="utf-8")
+        ),
+    )
+
+
+@pytest.fixture
+def authorization(
+    schema: dict[str, object], authorization_fixture_root: Path
+) -> AuthorizationStore:
     store = AuthorizationStore(AuthorizationFile(schema))
-    store.reload(Path("tests/fixtures/authorization/valid.csv"))
+    store.reload(authorization_fixture_root / "valid.csv")
     return store
 
 

@@ -60,12 +60,23 @@ class AccessController:
         self.release_deadline: float | None = None
 
     def start(self) -> None:
-        self._relay.setup(numbering="BCM", channel=self._gpio_channel)
+        if self.state is ControllerState.READY or self.state is ControllerState.RELEASED:
+            return
+        if self.state is not ControllerState.INITIALIZING:
+            raise RuntimeError("controller cannot be restarted")
+        try:
+            self._relay.setup(numbering="BCM", channel=self._gpio_channel)
+        except Exception:
+            self.state = ControllerState.FAULTED
+            self._audit(
+                EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL, {"reason": "setup_failed"}
+            )
+            raise
         try:
             self._relay.command(False)
         except Exception:
             self.state = ControllerState.FAULTED
-            self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL)
+            self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL, {"reason": "low_failed"})
             raise
         self.state = ControllerState.READY
         self._audit(EventType.SERVICE_STARTED, Severity.INFO)
@@ -74,17 +85,32 @@ class AccessController:
         if self.state not in {ControllerState.READY, ControllerState.RELEASED}:
             raise RuntimeError("controller is not accepting credentials")
         if isinstance(record, MalformedRecord):
+            safe_reason = (
+                record.reason
+                if record.reason
+                in {
+                    "invalid_length",
+                    "invalid_framing",
+                    "invalid_terminator",
+                    "invalid_encoding",
+                    "invalid_identifier",
+                    "invalid_checksum_encoding",
+                    "checksum_mismatch",
+                    "excessive_length",
+                }
+                else "malformed_record"
+            )
             self._audit(
                 EventType.MALFORMED_RECORD,
                 Severity.WARNING,
-                {"reason": record.reason},
+                {"reason": safe_reason},
             )
             self._record_suspicious()
             return AccessResult(None, PhysicalReleaseStatus.NOT_REQUESTED)
         return self._process_parsed(record)
 
     def _process_parsed(self, record: ParsedRecord) -> AccessResult:
-        outcome = AuthorizationOutcome(self._authorization.classify(record.credential))
+        outcome = self._authorization.classify(record.credential)
         if outcome is AuthorizationOutcome.DENIED:
             self._audit(EventType.CREDENTIAL_DENIED, Severity.WARNING)
             self._record_suspicious()
@@ -99,9 +125,9 @@ class AccessController:
         try:
             self._relay.command(True)
         except Exception:
+            self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL, {"reason": "high_failed"})
             self._attempt_safe_state()
             self.state = ControllerState.FAULTED
-            self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL)
             return AccessResult(outcome, PhysicalReleaseStatus.ACTUATION_FAILED)
         self.release_deadline = self._clock.monotonic() + self._release_seconds
         self.state = ControllerState.RELEASED
@@ -122,7 +148,11 @@ class AccessController:
                 self._relay.command(False)
             except Exception:
                 self.state = ControllerState.FAULTED
-                self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL)
+                self._audit(
+                    EventType.RELAY_CONTROL_ERROR,
+                    Severity.CRITICAL,
+                    {"reason": "low_failed"},
+                )
                 return
             self.release_deadline = None
             self.state = ControllerState.READY
@@ -135,18 +165,34 @@ class AccessController:
         self._audit(EventType.RELAY_CONTROL_ERROR, Severity.ERROR)
 
     def shutdown(self) -> None:
+        if self.state is ControllerState.STOPPED:
+            return
         self.state = ControllerState.SHUTTING_DOWN
-        self._attempt_safe_state()
+        safe = self._attempt_safe_state()
         self.release_deadline = None
-        self._relay.cleanup()
-        self.state = ControllerState.STOPPED
-        self._audit(EventType.SERVICE_SHUTDOWN, Severity.INFO)
+        cleanup_ok = True
+        try:
+            self._relay.cleanup()
+        except Exception:
+            cleanup_ok = False
+            self._audit(
+                EventType.RELAY_CONTROL_ERROR,
+                Severity.CRITICAL,
+                {"reason": "cleanup_failed"},
+            )
+        if safe and cleanup_ok:
+            self.state = ControllerState.STOPPED
+            self._audit(EventType.SERVICE_SHUTDOWN, Severity.INFO)
+        else:
+            self.state = ControllerState.FAULTED
 
-    def _attempt_safe_state(self) -> None:
+    def _attempt_safe_state(self) -> bool:
         try:
             self._relay.command(False)
         except Exception:
-            self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL)
+            self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL, {"reason": "low_failed"})
+            return False
+        return True
 
     def _record_suspicious(self) -> None:
         escalation = self._escalation.record(self._clock.monotonic())
@@ -155,7 +201,14 @@ class AccessController:
         elif escalation is EscalationLevel.CRITICAL:
             event = self._new_event(EventType.ESCALATION_CRITICAL, Severity.CRITICAL)
             self._audit_sink.append(event)
-            self._notifications.enqueue(event)
+            try:
+                self._notifications.enqueue(event)
+            except Exception:
+                self._audit(
+                    EventType.NOTIFICATION_DELIVERY_FAILED,
+                    Severity.ERROR,
+                    {"reason": "queue_unavailable"},
+                )
 
     def _audit(
         self,

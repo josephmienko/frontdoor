@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from bridgewire.audit import InMemoryAuditSink, InMemoryNotificationQueue
+from bridgewire.audit import AuditEvent, InMemoryAuditSink, InMemoryNotificationQueue
 from bridgewire.authorization import AuthorizationFile, AuthorizationStore
 from bridgewire.clock import ManualClock
 from bridgewire.controller import AccessController
 from bridgewire.escalation import EscalationTracker
-from bridgewire.gpio import SimulatedRelay
+from bridgewire.gpio import RelayAction, SimulatedRelay
 from bridgewire.reader import (
     BackoffPolicy,
     MalformedRecord,
@@ -39,6 +39,18 @@ class SimulatedReaderSession(ReaderSession):
         self.closed = True
 
 
+@dataclass(frozen=True, slots=True)
+class VerticalSliceResult:
+    events: list[dict[str, object]]
+    audit_events: list[AuditEvent]
+    reader_events: list[ReaderEvent]
+    relay_actions: list[RelayAction]
+    notification_count: int
+    final_controller_state: str
+    final_relay_high: bool
+    reader_state_transitions: list[str]
+
+
 def build_record(credential: str) -> bytes:
     checksum = 0
     for offset in range(0, len(credential), 2):
@@ -47,6 +59,10 @@ def build_record(credential: str) -> bytes:
 
 
 def run_vertical_slice(schema_path: Path, authorization_path: Path) -> list[dict[str, object]]:
+    return run_vertical_slice_result(schema_path, authorization_path).events
+
+
+def run_vertical_slice_result(schema_path: Path, authorization_path: Path) -> VerticalSliceResult:
     clock = ManualClock()
     audit = InMemoryAuditSink()
     notifications = InMemoryNotificationQueue()
@@ -106,7 +122,22 @@ def run_vertical_slice(schema_path: Path, authorization_path: Path) -> list[dict
         }
         for event in reader_events
     )
-    return output
+    return VerticalSliceResult(
+        events=output,
+        audit_events=list(audit.events),
+        reader_events=reader_events,
+        relay_actions=list(relay.actions),
+        notification_count=len(notifications.events),
+        final_controller_state=controller.state.value,
+        final_relay_high=relay.is_high,
+        reader_state_transitions=[
+            "connecting",
+            "ready",
+            "degraded",
+            "connecting",
+            "ready",
+        ],
+    )
 
 
 def _load_schema(path: Path) -> dict[str, object]:

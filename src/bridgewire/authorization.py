@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -28,6 +29,11 @@ class AuthorizationRecord:
     allow: bool
 
 
+@dataclass(frozen=True, slots=True)
+class AuthorizationInstallFailure:
+    stage: str
+
+
 def normalize_key(key: str) -> str:
     return key.replace("-", "").upper()
 
@@ -40,14 +46,19 @@ class AuthorizationFile:
         try:
             with path.open(encoding="utf-8", newline="") as handle:
                 return self.load_stream(handle)
+        except UnicodeError as exc:
+            raise AuthorizationError("authorization file has invalid UTF-8 encoding") from exc
         except OSError as exc:
             raise AuthorizationError(str(exc)) from exc
 
     def load_stream(self, handle: TextIO) -> dict[str, AuthorizationRecord]:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames != ["KEY", "NAME", "ALLOW"]:
-            raise AuthorizationError("authorization header must be exactly KEY,NAME,ALLOW")
-        raw_rows = [dict(row) for row in reader]
+        try:
+            reader = csv.DictReader(handle, strict=True)
+            if reader.fieldnames != ["KEY", "NAME", "ALLOW"]:
+                raise AuthorizationError("authorization header must be exactly KEY,NAME,ALLOW")
+            raw_rows = [dict(row) for row in reader]
+        except csv.Error as exc:
+            raise AuthorizationError("authorization CSV is malformed") from exc
         errors = sorted(self._validator.iter_errors(raw_rows), key=lambda error: list(error.path))
         if errors:
             raise AuthorizationError(errors[0].message)
@@ -78,24 +89,39 @@ class AuthorizationStore:
         candidate = self._parser.load(path)
         self._records = candidate
 
-    def classify(self, credential: str) -> str:
+    def classify(self, credential: str) -> AuthorizationOutcome:
         record = self._records.get(normalize_key(credential))
         if record is None:
-            return AuthorizationOutcome.UNKNOWN.value
+            return AuthorizationOutcome.UNKNOWN
         if record.allow:
-            return AuthorizationOutcome.AUTHORIZED.value
-        return AuthorizationOutcome.DENIED.value
+            return AuthorizationOutcome.AUTHORIZED
+        return AuthorizationOutcome.DENIED
 
 
 def install_authorization_candidate(
     candidate: Path,
     destination: Path,
     parser: AuthorizationFile,
+    *,
+    on_failure: Callable[[AuthorizationInstallFailure], None] | None = None,
+    failure_injector: Callable[[str], None] | None = None,
 ) -> None:
-    parser.load(candidate)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
+    stage = "candidate_validation"
     try:
+        if failure_injector is not None:
+            failure_injector(stage)
+        parser.load(candidate)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        for abandoned in destination.parent.glob(f".{destination.name}.*"):
+            try:
+                abandoned.unlink()
+            except OSError:
+                if on_failure is not None:
+                    on_failure(AuthorizationInstallFailure("abandoned_cleanup"))
+        stage = "temporary_creation"
+        if failure_injector is not None:
+            failure_injector(stage)
         with (
             candidate.open("rb") as source,
             tempfile.NamedTemporaryFile(
@@ -106,13 +132,38 @@ def install_authorization_candidate(
             ) as temporary,
         ):
             temporary_path = Path(temporary.name)
+            stage = "candidate_copy"
+            if failure_injector is not None:
+                failure_injector(stage)
             while chunk := source.read(64 * 1024):
                 temporary.write(chunk)
+            stage = "temporary_flush"
+            if failure_injector is not None:
+                failure_injector(stage)
             temporary.flush()
+            stage = "temporary_fsync"
+            if failure_injector is not None:
+                failure_injector(stage)
             os.fsync(temporary.fileno())
+        stage = "temporary_validation"
+        if failure_injector is not None:
+            failure_injector(stage)
         parser.load(temporary_path)
+        stage = "atomic_replace"
+        if failure_injector is not None:
+            failure_injector(stage)
         os.replace(temporary_path, destination)
         temporary_path = None
+    except Exception:
+        if on_failure is not None:
+            on_failure(AuthorizationInstallFailure(stage))
+        raise
     finally:
         if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+            try:
+                if failure_injector is not None:
+                    failure_injector("temporary_cleanup")
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                if on_failure is not None:
+                    on_failure(AuthorizationInstallFailure("temporary_cleanup"))

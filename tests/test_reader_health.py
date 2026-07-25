@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -10,7 +11,10 @@ from bridgewire.reader import (
     ReaderDisconnectedError,
     ReaderEvent,
     ReaderEventType,
+    ReaderHealthState,
     ReaderIdentity,
+    ReaderRecordStream,
+    ReaderSession,
     ReaderSupervisor,
     SerialDevice,
     discover_reader,
@@ -173,3 +177,188 @@ def test_reader_silence_is_not_classified_as_failure() -> None:
         ReaderEventType.READER_CONNECTING,
         ReaderEventType.READER_CONNECTED,
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("identity", "device"),
+    [
+        (
+            ReaderIdentity(vid=1, pid=2, manufacturer="Fixture Manufacturer"),
+            SerialDevice(Path("m"), vid=1, pid=2, manufacturer="Fixture Manufacturer"),
+        ),
+        (
+            ReaderIdentity(vid=1, pid=2, product="Fixture Reader"),
+            SerialDevice(Path("p"), vid=1, pid=2, product="Fixture Reader"),
+        ),
+        (
+            ReaderIdentity(vid=1, pid=2, serial_number="FAKE-SERIAL"),
+            SerialDevice(Path("s"), vid=1, pid=2, serial_number="FAKE-SERIAL"),
+        ),
+    ],
+)
+def test_optional_identity_attributes_match(identity: ReaderIdentity, device: SerialDevice) -> None:
+    assert discover_reader([UNRELATED, device], identity).device == device
+
+
+@pytest.mark.unit
+def test_serial_mismatch_and_ambiguous_vid_pid() -> None:
+    mismatch = SerialDevice(Path("x"), vid=0x1234, pid=0x5678, serial_number="OTHER")
+    assert discover_reader([mismatch], IDENTITY).status is DiscoveryStatus.NOT_FOUND
+    generic = ReaderIdentity(vid=1, pid=2)
+    devices = [SerialDevice(Path(str(index)), vid=1, pid=2) for index in range(2)]
+    assert discover_reader(devices, generic).status is DiscoveryStatus.AMBIGUOUS
+
+
+@pytest.mark.unit
+def test_exact_by_id_match_has_priority_over_broad_metadata_match() -> None:
+    stable = Path("/dev/serial/by-id/fixture")
+    identity = ReaderIdentity(by_id_path=stable, vid=1, pid=2)
+    exact = SerialDevice(Path("exact"), stable, vid=1, pid=2)
+    broad = SerialDevice(Path("broad"), vid=1, pid=2)
+    assert discover_reader([broad, exact], identity).device == exact
+
+
+@pytest.mark.failure_mode
+def test_unusable_open_result_is_reported_as_open_failure() -> None:
+    events: list[ReaderEvent] = []
+    supervisor = ReaderSupervisor(
+        identity=IDENTITY,
+        enumerate_devices=lambda: [MATCH],
+        open_reader=lambda _path: cast(ReaderSession, object()),
+        wait=lambda _delay: False,
+        emit=events.append,
+    )
+    assert not supervisor.connect_until_ready(1)
+    assert ReaderEventType.READER_OPEN_FAILED in [event.event_type for event in events]
+
+
+@pytest.mark.unit
+def test_nonempty_read_emits_record_received_and_close_is_exactly_once() -> None:
+    class CountingSession:
+        def __init__(self) -> None:
+            self.closes = 0
+
+        def read(self) -> bytes:
+            return b"sanitized"
+
+        def close(self) -> None:
+            self.closes += 1
+
+    events: list[ReaderEvent] = []
+    session = CountingSession()
+    supervisor = ReaderSupervisor(
+        identity=IDENTITY,
+        enumerate_devices=lambda: [MATCH],
+        open_reader=lambda _path: session,
+        wait=lambda _delay: True,
+        emit=events.append,
+    )
+    assert supervisor.connect_until_ready(1)
+    assert supervisor.read_once() == b"sanitized"
+    assert events[-1].event_type is ReaderEventType.READER_RECORD_RECEIVED
+    supervisor.close()
+    supervisor.close()
+    assert session.closes == 1
+
+
+@pytest.mark.failure_mode
+def test_repeated_reconnect_alert_emits_once_per_degraded_period() -> None:
+    events: list[ReaderEvent] = []
+    supervisor = ReaderSupervisor(
+        identity=IDENTITY,
+        enumerate_devices=lambda: [],
+        open_reader=lambda _path: SimulatedReaderSession([]),
+        wait=lambda _delay: True,
+        emit=events.append,
+        repeated_failure_threshold=2,
+    )
+    assert not supervisor.connect_until_ready(6)
+    assert [event.event_type for event in events].count(
+        ReaderEventType.RECONNECT_REPEATEDLY_FAILED
+    ) == 1
+
+
+@pytest.mark.failure_mode
+def test_each_connect_call_receives_its_own_attempt_budget() -> None:
+    events: list[ReaderEvent] = []
+    supervisor = ReaderSupervisor(
+        identity=IDENTITY,
+        enumerate_devices=lambda: [],
+        open_reader=lambda _path: SimulatedReaderSession([]),
+        wait=lambda _delay: True,
+        emit=events.append,
+    )
+
+    assert not supervisor.connect_until_ready(1)
+    first_connecting_count = [event.event_type for event in events].count(
+        ReaderEventType.READER_CONNECTING
+    )
+
+    assert not supervisor.connect_until_ready(1)
+    assert [event.event_type for event in events].count(
+        ReaderEventType.READER_CONNECTING
+    ) == first_connecting_count + 1
+
+
+@pytest.mark.failure_mode
+def test_strict_decode_failure_emits_private_malformed_event() -> None:
+    events: list[ReaderEvent] = []
+    session = SimulatedReaderSession([b"\x02A1B2C3D4E500\r\n\x03"])
+    supervisor = ReaderSupervisor(
+        identity=IDENTITY,
+        enumerate_devices=lambda: [MATCH],
+        open_reader=lambda _path: session,
+        wait=lambda _delay: True,
+        emit=events.append,
+    )
+    assert supervisor.connect_until_ready(1)
+    results = supervisor.read_records_once(ReaderRecordStream())
+    assert results
+    assert events[-1] == ReaderEvent(ReaderEventType.READER_RECORD_MALFORMED)
+    assert "A1B2C3D4E5" not in str(events)
+
+
+@pytest.mark.unit
+def test_last_record_age_is_telemetry_only() -> None:
+    now = 10.0
+    events: list[ReaderEvent] = []
+    session = SimulatedReaderSession([b"record", b""])
+    supervisor = ReaderSupervisor(
+        identity=IDENTITY,
+        enumerate_devices=lambda: [MATCH],
+        open_reader=lambda _path: session,
+        wait=lambda _delay: True,
+        emit=events.append,
+        monotonic=lambda: now,
+    )
+    assert supervisor.connect_until_ready(1)
+    supervisor.read_once()
+    now = 10_000.0
+    assert supervisor.last_record_age == 9990
+    assert supervisor.read_once() == b""
+    assert supervisor.health_state is ReaderHealthState.READY
+    assert supervisor.connected
+    assert ReaderEventType.RECONNECT_SCHEDULED not in [event.event_type for event in events]
+
+
+@pytest.mark.failure_mode
+def test_shutdown_during_reconnect_wait_is_prompt(system: tuple[object, ...]) -> None:
+    from bridgewire.controller import AccessController, ControllerState
+
+    controller = cast(AccessController, system[0])
+    controller.start()
+
+    def interrupt(_delay: float) -> bool:
+        controller.shutdown()
+        return False
+
+    supervisor = ReaderSupervisor(
+        identity=IDENTITY,
+        enumerate_devices=lambda: [],
+        open_reader=lambda _path: SimulatedReaderSession([]),
+        wait=interrupt,
+        emit=lambda _event: None,
+    )
+    assert not supervisor.connect_until_ready(10)
+    assert controller.state is ControllerState.STOPPED

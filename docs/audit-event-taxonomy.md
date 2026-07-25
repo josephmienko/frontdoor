@@ -16,5 +16,7 @@ tokens, secrets, or webhook values are rejected. Production code never places
 raw record bytes or decoded identifiers in audit values. Reader parser errors
 report a reason category only.
 
-The JSONL queue writes locally first. Delivery status can later move from
-pending to delivered, but endpoint delivery is outside this increment.
+The access controller writes only to a local queue. A separate notification
+worker attempts endpoint delivery and removes an item only after success.
+Endpoint exceptions and repeated failures leave the original event pending;
+network delay or failure therefore never runs on the access-control path.

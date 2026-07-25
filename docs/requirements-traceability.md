@@ -34,3 +34,13 @@ Additional requirement coverage:
 Hardware deployment, live notification delivery, real endpoints, and real
 credentials are excluded by the increment contract and have no implementation
 claim here.
+
+## Hardening adjustment
+
+The adjustment suite adds independent literal reader frames; normalized-key
+and empty-file policy tests; deterministic atomic-install failure injection;
+GPIO startup, restoration, cleanup, and idempotency failures; notifier retry
+retention; real-flow privacy assertions; semantic-version consistency;
+inclusive and adjacent escalation boundaries; detailed reader identity,
+telemetry, and reconnect cases; working-directory-independent resource tests;
+and exact vertical-slice audit/GPIO/reader ordering assertions.

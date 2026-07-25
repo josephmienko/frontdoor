@@ -3,6 +3,7 @@
   "$id": "https://bridgewire.invalid/schemas/authorization-file/v1.json",
   "title": "Bridgewire authorization rows",
   "type": "array",
+  "minItems": 1,
   "items": {
     "type": "object",
     "additionalProperties": false,
@@ -10,11 +11,11 @@
     "properties": {
       "KEY": {
         "type": "string",
-        "pattern": "^(?:[0-9A-Fa-f]{2}-?){5}$"
+        "pattern": "^(?:[0-9A-Fa-f]{10}|[0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){4})$"
       },
       "NAME": {
         "type": "string",
-        "minLength": 1,
+        "pattern": "^(?=.*\\S).+$",
         "maxLength": 120
       },
       "ALLOW": {

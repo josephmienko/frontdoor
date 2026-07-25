@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.1 (2026-07-25)
+
+### Bug Fixes
+
+- Restart service when selecting deployment mode
+  ([`ad705be`](https://github.com/josephmienko/frontdoor/commit/ad705be84f069354606ed7fd2e0b2836fb5259f1))
+
+
 ## v1.2.0 (2026-07-25)
 
 ### Features

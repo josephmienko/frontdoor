@@ -7,6 +7,7 @@ requires-python = ">=3.13,<3.14"
 authors = [{ name = "Joe Mienko", email = "joseph.mienko@gmail.com" }]
 dependencies = [
     "jsonschema>=4.25,<5",
+    "RPi.GPIO>=0.7.1,<0.8; platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
 
 [project.scripts]

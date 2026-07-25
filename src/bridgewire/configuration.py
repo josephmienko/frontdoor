@@ -33,12 +33,18 @@ class GpioConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class RelayConfiguration:
+    backend: str
+
+
+@dataclass(frozen=True, slots=True)
 class SystemConfiguration:
     reader_identity: ReaderIdentity
     serial: SerialConfiguration
     gpio: GpioConfiguration
     backoff: BackoffPolicy
     escalation: EscalationPolicy
+    relay: RelayConfiguration
 
 
 def _table(parent: dict[str, object], name: str) -> dict[str, object]:
@@ -102,6 +108,9 @@ def load_configuration(path: Path) -> SystemConfiguration:
         gpio = _table(raw, "gpio")
         reconnect = _table(raw, "reconnect")
         escalation = _table(raw, "escalation")
+        relay = raw.get("relay", {"backend": "simulated"})
+        if not isinstance(relay, dict):
+            raise ConfigurationError("relay must be a table")
         by_id_path = _optional_string(reader, "by_id_path")
         identity = ReaderIdentity(
             by_id_path=Path(by_id_path) if by_id_path else None,
@@ -138,6 +147,9 @@ def load_configuration(path: Path) -> SystemConfiguration:
             critical_window=_number(escalation, "critical_window_seconds"),
             reset_after=_number(escalation, "reset_after_seconds"),
         )
+        relay_config = RelayConfiguration(
+            backend=_string(cast(dict[str, object], relay), "backend")
+        )
     except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
         if isinstance(exc, ConfigurationError):
             raise
@@ -146,4 +158,8 @@ def load_configuration(path: Path) -> SystemConfiguration:
         raise ConfigurationError("serial configuration violates the approved reader contract")
     if gpio_config != GpioConfiguration("BCM", 23, False, True, 3.0):
         raise ConfigurationError("GPIO configuration violates the approved GPIO contract")
-    return SystemConfiguration(identity, serial_config, gpio_config, backoff, escalation_policy)
+    if relay_config.backend not in {"simulated", "raspberry_pi"}:
+        raise ConfigurationError("relay backend must be simulated or raspberry_pi")
+    return SystemConfiguration(
+        identity, serial_config, gpio_config, backoff, escalation_policy, relay_config
+    )

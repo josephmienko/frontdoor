@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 
 
 @dataclass(slots=True)
@@ -20,3 +21,11 @@ class ManualClock:
             raise ValueError("clock cannot move backwards")
         self.elapsed += seconds
         self.wall_time += timedelta(seconds=seconds)
+
+
+class SystemClock:
+    def monotonic(self) -> float:
+        return monotonic()
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)

@@ -1,5 +1,7 @@
 [reader]
-by_id_path = "/dev/serial/by-id/bridgewire-simulated-reader"
+by_id_path = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
+vid = 6790
+pid = 29987
 
 [serial]
 baud_rate = 9600
@@ -17,7 +19,7 @@ release_high = true
 release_seconds = 3.0
 
 [relay]
-backend = "simulated"
+backend = "raspberry_pi"
 
 [reconnect]
 minimum_seconds = 1.0

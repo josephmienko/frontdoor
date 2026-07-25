@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from importlib import import_module
+from typing import Any
 
 from bridgewire.interfaces import Clock
 
@@ -62,3 +64,43 @@ class SimulatedRelay:
         self.actions.append(
             RelayAction(RelayActionType.CLEANUP, self._clock.monotonic(), self.channel)
         )
+
+
+class RaspberryPiRelay:
+    """Fail-safe RPi.GPIO adapter; import is lazy to preserve backend isolation."""
+
+    def __init__(self, gpio: object | None = None) -> None:
+        if gpio is None:
+            gpio = import_module("RPi.GPIO")
+        self._gpio: Any = gpio
+        self._channel: int | None = None
+        self._closed = False
+
+    def setup(self, *, numbering: str, channel: int) -> None:
+        if self._channel is not None:
+            return
+        if numbering != "BCM" or channel != 23:
+            raise ValueError("physical relay requires BCM channel 23")
+        gpio = self._gpio
+        gpio.setwarnings(False)
+        gpio.setmode(gpio.BCM)
+        gpio.setup(channel, gpio.OUT, initial=gpio.LOW)
+        self._channel = channel
+        self._closed = False
+
+    def command(self, high: bool) -> None:
+        if self._channel is None or self._closed:
+            raise RuntimeError("relay has not been set up")
+        gpio = self._gpio
+        gpio.output(self._channel, gpio.HIGH if high else gpio.LOW)
+
+    def cleanup(self) -> None:
+        if self._channel is None or self._closed:
+            return
+        gpio = self._gpio
+        channel = self._channel
+        try:
+            gpio.output(channel, gpio.LOW)
+        finally:
+            gpio.cleanup(channel)
+            self._closed = True

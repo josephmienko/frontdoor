@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -39,6 +40,18 @@ class EventType(StrEnum):
     AUTHORIZATION_RELOAD_FAILED = "authorization_reload_failed"
     NOTIFICATION_DELIVERY_FAILED = "notification_delivery_failed"
     NOTIFICATION_BACKLOG_RECOVERED = "notification_backlog_recovered"
+    READER_CONNECTING = "reader_connecting"
+    READER_CONNECTED = "reader_connected"
+    READER_NOT_FOUND = "reader_not_found"
+    READER_IDENTITY_AMBIGUOUS = "reader_identity_ambiguous"
+    READER_OPEN_FAILED = "reader_open_failed"
+    READER_READ_FAILED = "reader_read_failed"
+    READER_DISCONNECTED = "reader_disconnected"
+    READER_RECOVERED = "reader_recovered"
+    READER_RECORD_RECEIVED = "reader_record_received"
+    READER_RECORD_MALFORMED = "reader_record_malformed"
+    RECONNECT_SCHEDULED = "reconnect_scheduled"
+    RECONNECT_REPEATEDLY_FAILED = "reconnect_repeatedly_failed"
 
 
 _FORBIDDEN_KEYS = ("credential", "card", "name", "secret", "token", "webhook", "password")
@@ -106,6 +119,58 @@ class InMemoryAuditSink:
 
     def append(self, event: AuditEvent) -> None:
         self.events.append(event)
+
+
+class SQLiteAuditSink:
+    """Transactional durable event repository with privacy-preserving payloads."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._connection = sqlite3.connect(path)
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA synchronous=FULL")
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_events (
+                event_id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                correlation TEXT NOT NULL,
+                reader_state TEXT,
+                controller_state TEXT,
+                delivery_status TEXT
+            )
+            """
+        )
+        self._connection.commit()
+
+    def append(self, event: AuditEvent) -> None:
+        payload = event.as_dict()
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["event_id"],
+                    payload["timestamp"],
+                    payload["event_type"],
+                    payload["severity"],
+                    json.dumps(payload["correlation"], sort_keys=True),
+                    payload["reader_state"],
+                    payload["controller_state"],
+                    payload["delivery_status"],
+                ),
+            )
+
+    def count(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def close(self) -> None:
+        self._connection.close()
 
 
 class InMemoryNotificationQueue:

@@ -37,6 +37,13 @@ def build_parser() -> argparse.ArgumentParser:
         if action.dest not in {"help"}:
             serve._add_action(action)
     serve.add_argument("--interval", type=float, default=60.0)
+    hardware = subparsers.add_parser("serve-hardware")
+    hardware.add_argument("--config", type=Path, required=True)
+    hardware.add_argument("--schema", type=Path, required=True)
+    hardware.add_argument("--authorization", type=Path, required=True)
+    hardware.add_argument("--audit", type=Path, required=True)
+    hardware.add_argument("--notifications", type=Path, required=True)
+    hardware.add_argument("--health", type=Path, required=True)
     return parser
 
 
@@ -45,6 +52,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "version":
         print(__version__)
         return 0
+    if args.command == "serve-hardware":
+        from bridgewire.hardware_service import run_hardware_service
+
+        return run_hardware_service(
+            config_path=args.config,
+            authorization_path=args.authorization,
+            schema_path=args.schema,
+            audit_path=args.audit,
+            notification_path=args.notifications,
+            health_path=args.health,
+        )
     load_configuration(args.config)
     if args.command == "serve-simulated":
         if args.interval <= 0:

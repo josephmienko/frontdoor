@@ -211,12 +211,12 @@ def test_serial_mismatch_and_ambiguous_vid_pid() -> None:
 
 
 @pytest.mark.unit
-def test_exact_by_id_match_has_priority_over_broad_metadata_match() -> None:
+def test_non_unique_by_id_identity_rejects_broad_metadata_ambiguity() -> None:
     stable = Path("/dev/serial/by-id/fixture")
     identity = ReaderIdentity(by_id_path=stable, vid=1, pid=2)
     exact = SerialDevice(Path("exact"), stable, vid=1, pid=2)
     broad = SerialDevice(Path("broad"), vid=1, pid=2)
-    assert discover_reader([broad, exact], identity).device == exact
+    assert discover_reader([broad, exact], identity).status is DiscoveryStatus.AMBIGUOUS
 
 
 @pytest.mark.failure_mode

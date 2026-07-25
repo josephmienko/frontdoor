@@ -27,7 +27,9 @@ sudo bash scripts/bootstrap-rp4-bench.sh \
 
 Remove `--dry-run` to apply it. Add `--maintenance-upgrade` only for an
 operator-approved maintenance upgrade. Add `--install-service` to install and
-start the safe simulated systemd service.
+start the safe simulated systemd service. Use `--install-hardware-service`
+only with an explicitly validated `relay.backend = "raspberry_pi"` bench
+configuration. The two modes use the same unit name and cannot run together.
 
 ## Result and rollback
 

@@ -13,6 +13,7 @@ CONFIG_PATH=""
 AUTHORIZATION_PATH=""
 SCHEMA_PATH=""
 INSTALL_SERVICE=false
+HARDWARE_SERVICE=false
 
 usage() {
   cat <<'EOF'
@@ -31,6 +32,7 @@ Optional:
   --maintenance-upgrade      Run apt-get update and full-upgrade first
   --dry-run                  Print mutating commands without running them
   --install-service          Install and enable the safe simulated service
+  --install-hardware-service Install the supervised physical bench service
   -h, --help                 Show this help
 
 This script is safe for a standalone bench Pi. It does not configure GPIO,
@@ -77,6 +79,8 @@ while (($#)); do
       DRY_RUN=true; shift ;;
     --install-service)
       INSTALL_SERVICE=true; shift ;;
+    --install-hardware-service)
+      INSTALL_SERVICE=true; HARDWARE_SERVICE=true; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -140,6 +144,9 @@ if ! id bridgewire >/dev/null 2>&1; then
   run useradd --system --gid bridgewire --home-dir "$state_dir" \
     --create-home --shell /usr/sbin/nologin bridgewire
 fi
+if "$HARDWARE_SERVICE"; then
+  run usermod -a -G dialout,gpio bridgewire
+fi
 
 run install -d -o root -g root -m 0755 "$base_dir" "$base_dir/releases" "$base_dir/venvs"
 run install -d -o root -g bridgewire -m 0750 "$release_dir" "$shared_dir"
@@ -166,7 +173,37 @@ printf 'Bridgewire bench release %s is staged at %s.\n' "$version" "$release_dir
 if "${INSTALL_SERVICE:-false}"; then
   unit="$(mktemp)"
   trap 'rm -f "$unit"' EXIT
-  cat >"$unit" <<EOF
+  if "$HARDWARE_SERVICE"; then
+    cat >"$unit" <<EOF
+[Unit]
+Description=Bridgewire supervised hardware access-control service
+After=local-fs.target
+Conflicts=bridgewire-simulated.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=bridgewire
+Group=bridgewire
+SupplementaryGroups=dialout gpio
+ExecStart=/opt/bridgewire/current-venv/bin/bridgewire serve-hardware --config /opt/bridgewire/shared/config.toml --authorization /opt/bridgewire/shared/authorization.csv --schema /opt/bridgewire/shared/schema.json --audit /var/lib/bridgewire/audit.sqlite3 --notifications /var/lib/bridgewire/notifications.jsonl --health /run/bridgewire/health.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+RuntimeDirectory=bridgewire
+StateDirectory=bridgewire
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/bridgewire /run/bridgewire
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  else
+    cat >"$unit" <<EOF
 [Unit]
 Description=Bridgewire safe simulated access-control service
 After=network.target
@@ -186,6 +223,7 @@ ReadWritePaths=/var/lib/bridgewire
 [Install]
 WantedBy=multi-user.target
 EOF
+  fi
   run install -o root -g root -m 0644 "$unit" /etc/systemd/system/bridgewire.service
   run systemctl daemon-reload
   run systemctl enable --now bridgewire.service

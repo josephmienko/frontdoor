@@ -147,12 +147,7 @@ def discover_reader(
     devices: Sequence[SerialDevice],
     identity: ReaderIdentity,
 ) -> DiscoveryResult:
-    by_id_matches = (
-        [device for device in devices if device.by_id_path == identity.by_id_path]
-        if identity.by_id_path is not None
-        else []
-    )
-    matches = by_id_matches or [device for device in devices if _matches(device, identity)]
+    matches = [device for device in devices if _matches(device, identity)]
     if not matches:
         return DiscoveryResult(DiscoveryStatus.NOT_FOUND, unrelated_count=len(devices))
     if len(matches) > 1:

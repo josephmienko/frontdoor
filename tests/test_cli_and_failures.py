@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,6 +83,22 @@ def test_cli_simulation_is_json_lines_and_private(
     assert lines
     assert all(isinstance(json.loads(line), dict) for line in lines)
     assert "0102030405" not in "\n".join(lines)
+
+
+@pytest.mark.unit
+def test_simulated_service_stops_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class StopAfterFirstWait(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            self.set()
+            return True
+
+    monkeypatch.setattr("bridgewire.cli.threading.Event", StopAfterFirstWait)
+    monkeypatch.setattr("bridgewire.cli.signal.signal", lambda *_args: None)
+    assert main(["serve-simulated", "--interval", "0.01"]) == 0
+    assert capsys.readouterr().out
 
 
 @pytest.mark.unit

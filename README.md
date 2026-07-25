@@ -64,6 +64,11 @@ See [the increment architecture](docs/increment-1-architecture.md),
 [reader contract](docs/reader-contract.md), and
 [requirements traceability](docs/requirements-traceability.md).
 
+For a repeatable, simulation-safe Raspberry Pi 4 bench setup after installing
+the OS, see [RP4 bench restoration](docs/rp4-bench-bootstrap.md). The bootstrap
+validates the OS, architecture, Python version, and released wheel checksum;
+it does not configure physical access-control hardware.
+
 ## Contributions and releases
 
 Use Conventional Commits, for example `feat: add simulated reader recovery`.

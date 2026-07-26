@@ -32,6 +32,10 @@ class NotificationQueue(Protocol):
     def enqueue(self, event: AuditEvent) -> None: ...
 
 
+class HealthReporter(Protocol):
+    def report(self, status: str, **details: object) -> None: ...
+
+
 class AuthorizationSource(Protocol):
     def classify(self, credential: str) -> AuthorizationOutcome: ...
 

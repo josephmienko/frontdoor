@@ -95,12 +95,10 @@ def test_udev_identity_populates_non_unique_ch340_metadata(
         ]
     )
     monkeypatch.setattr(
-        "bridgewire.hardware_service.subprocess.check_output",
+        "bridgewire.adapters.reader.posix_serial.subprocess.check_output",
         lambda *_args, **_kwargs: output,
     )
-    device = _serial_device_from_by_id(
-        Path("/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0")
-    )
+    device = _serial_device_from_by_id(Path("/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"))
     assert (device.vid, device.pid, device.serial_number) == (0x1A86, 0x7523, None)
 
 

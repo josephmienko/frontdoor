@@ -1,0 +1,1 @@
+"""Physical reader adapters."""

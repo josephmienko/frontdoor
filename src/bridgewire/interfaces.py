@@ -36,6 +36,11 @@ class HealthReporter(Protocol):
     def report(self, status: str, **details: object) -> None: ...
 
 
+class Waiter(Protocol):
+    def wait(self, seconds: float, on_interval: Callable[[], None]) -> bool:
+        """Return false when cooperative shutdown interrupts the wait."""
+
+
 class AuthorizationSource(Protocol):
     def classify(self, credential: str) -> AuthorizationOutcome: ...
 

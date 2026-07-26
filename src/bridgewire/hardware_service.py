@@ -9,7 +9,6 @@ from pathlib import Path
 from bridgewire.adapters.health.file_reporter import FileHealthReporter
 from bridgewire.adapters.reader.posix_serial import (
     PosixSerialSession,
-    _serial_device_from_by_id,
     enumerate_serial_devices,
 )
 from bridgewire.application.access_service import AccessService
@@ -25,7 +24,6 @@ from bridgewire.reader import ReaderEvent, ReaderSession, ReaderSupervisor, Seri
 
 __all__ = [
     "PosixSerialSession",
-    "_serial_device_from_by_id",
     "enumerate_serial_devices",
     "run_hardware_service",
 ]
@@ -51,23 +49,11 @@ def run_hardware_service(
     if config.relay.backend != "raspberry_pi":
         raise ValueError("hardware service requires relay.backend = raspberry_pi")
     clock = SystemClock()
-    audit = SQLiteAuditSink(audit_path)
-    authorization = AuthorizationStore(
-        AuthorizationFile(json.loads(schema_path.read_text(encoding="utf-8")))
-    )
-    authorization.reload(authorization_path)
-    controller = AccessController(
-        authorization=authorization,
-        relay=RaspberryPiRelay(gpio),
-        audit=audit,
-        notifications=DurableNotificationQueue(notification_path),
-        clock=clock,
-        escalation=EscalationTracker(config.escalation),
-        release_seconds=config.gpio.release_seconds,
-        gpio_channel=config.gpio.channel,
-    )
-    access = AccessService(controller)
+    audit: SQLiteAuditSink | None = None
+    relay: RaspberryPiRelay | None = None
+    access: AccessService | None = None
     runtime: BridgewireRuntime | None = None
+    failures: list[BaseException] = []
 
     def wait(seconds: float) -> bool:
         assert runtime is not None
@@ -77,44 +63,84 @@ def run_hardware_service(
         assert runtime is not None
         runtime.record_reader_event(event)
 
-    opener = open_reader or (lambda path: PosixSerialSession(path, config.serial.baud_rate))
-    reader = ReaderSupervisor(
-        identity=config.reader_identity,
-        enumerate_devices=enumerate_devices,
-        open_reader=opener,
-        wait=wait,
-        emit=emit,
-        backoff=config.backoff,
-        monotonic=clock.monotonic,
-    )
-    runtime = BridgewireRuntime(
-        access=access,
-        reader=reader,
-        health_reporter=FileHealthReporter(health_path),
-        audit=audit,
-        clock=clock,
-        maximum_record_bytes=config.serial.maximum_record_bytes,
-        stop_event=stop_event,
-    )
-    if install_signals:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(signum, lambda _signum, _frame: runtime.request_shutdown())
     try:
-        runtime.start()
-        while not runtime.shutdown_requested:
-            was_connected = reader.connected
-            runtime.run_once()
-            if not was_connected and reader.connected:
-                print(
-                    json.dumps({"event": "service_ready", "reader": "connected"}),
-                    flush=True,
+        audit = SQLiteAuditSink(audit_path)
+        authorization = AuthorizationStore(
+            AuthorizationFile(json.loads(schema_path.read_text(encoding="utf-8")))
+        )
+        authorization.reload(authorization_path)
+        relay = RaspberryPiRelay(gpio)
+        controller = AccessController(
+            authorization=authorization,
+            relay=relay,
+            audit=audit,
+            notifications=DurableNotificationQueue(notification_path),
+            clock=clock,
+            escalation=EscalationTracker(config.escalation),
+            release_seconds=config.gpio.release_seconds,
+            gpio_channel=config.gpio.channel,
+        )
+        access = AccessService(controller)
+        opener = open_reader or (lambda path: PosixSerialSession(path, config.serial.baud_rate))
+        reader = ReaderSupervisor(
+            identity=config.reader_identity,
+            enumerate_devices=enumerate_devices,
+            open_reader=opener,
+            wait=wait,
+            emit=emit,
+            backoff=config.backoff,
+            monotonic=clock.monotonic,
+        )
+        runtime = BridgewireRuntime(
+            access=access,
+            reader=reader,
+            health_reporter=FileHealthReporter(health_path),
+            audit=audit,
+            clock=clock,
+            maximum_record_bytes=config.serial.maximum_record_bytes,
+            stop_event=stop_event,
+        )
+        if install_signals:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(
+                    signum,
+                    lambda _signum, _frame: runtime.request_shutdown(),
                 )
-        return 0
-    except BaseException:
-        runtime.report_fault()
-        if access.controller_state.value not in {"initializing", "stopped"}:
-            access.recoverable_failure()
-        raise
+        runtime.start()
+        runtime.run(
+            on_ready=lambda: print(
+                json.dumps({"event": "service_ready", "reader": "connected"}),
+                flush=True,
+            )
+        )
+    except BaseException as exc:
+        failures.append(exc)
+        if runtime is not None:
+            for action in (runtime.report_fault, runtime.handle_failure):
+                try:
+                    action()
+                except BaseException as cleanup_exc:
+                    failures.append(cleanup_exc)
     finally:
-        runtime.shutdown()
-        audit.close()
+        if runtime is not None:
+            try:
+                runtime.shutdown()
+            except BaseException as exc:
+                failures.append(exc)
+        # Final hardware-owned fallback: RaspberryPiRelay.cleanup commands LOW
+        # before cleanup and is idempotent after successful controller shutdown.
+        if relay is not None:
+            try:
+                relay.cleanup()
+            except BaseException as exc:
+                failures.append(exc)
+        if audit is not None:
+            try:
+                audit.close()
+            except BaseException as exc:
+                failures.append(exc)
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        raise BaseExceptionGroup("hardware service failed", failures)
+    return 0

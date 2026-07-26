@@ -8,6 +8,8 @@ from typing import Any
 
 from bridgewire.reader import ReaderDisconnectedError, ReaderSession, SerialDevice
 
+UDEVADM_TIMEOUT_SECONDS = 0.5
+
 
 class PosixSerialSession(ReaderSession):
     def __init__(self, path: Path, baud_rate: int) -> None:
@@ -57,20 +59,28 @@ def enumerate_serial_devices() -> list[SerialDevice]:
     root = Path("/dev/serial/by-id")
     if not root.is_dir():
         return []
-    return [_serial_device_from_by_id(path) for path in sorted(root.iterdir()) if path.is_symlink()]
+    devices: list[SerialDevice] = []
+    for path in sorted(root.iterdir()):
+        if not path.is_symlink():
+            continue
+        device = _serial_device_from_by_id(path)
+        if device is not None:
+            devices.append(device)
+    return devices
 
 
-def _serial_device_from_by_id(path: Path) -> SerialDevice:
+def _serial_device_from_by_id(path: Path) -> SerialDevice | None:
     properties: dict[str, str] = {}
     try:
         output = subprocess.check_output(
             ["udevadm", "info", "--query=property", f"--name={path}"],
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=UDEVADM_TIMEOUT_SECONDS,
         )
         properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
-    except (OSError, subprocess.CalledProcessError):
-        pass
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
     return SerialDevice(
         path=path.resolve(),
         by_id_path=path,

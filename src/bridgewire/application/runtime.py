@@ -1,17 +1,42 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from types import MappingProxyType
 
 from bridgewire.application.access_service import AccessService, CredentialSource
 from bridgewire.audit import AuditEvent, EventType, Severity
-from bridgewire.interfaces import AuditSink, Clock, HealthReporter
+from bridgewire.interfaces import AuditSink, Clock, HealthReporter, Waiter
 from bridgewire.reader import (
     ReaderEvent,
     ReaderEventType,
     ReaderRecordStream,
     ReaderSupervisor,
 )
+
+
+class EventWaiter:
+    """Production waiter that keeps ticking and responds promptly to shutdown."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        stop_event: threading.Event,
+        *,
+        interval_seconds: float = 0.05,
+    ) -> None:
+        self._clock = clock
+        self._stop_event = stop_event
+        self._interval_seconds = interval_seconds
+
+    def wait(self, seconds: float, on_interval: Callable[[], None]) -> bool:
+        deadline = self._clock.monotonic() + seconds
+        while self._clock.monotonic() < deadline:
+            on_interval()
+            remaining = max(0.0, deadline - self._clock.monotonic())
+            if self._stop_event.wait(min(self._interval_seconds, remaining)):
+                return False
+        return True
 
 
 class BridgewireRuntime:
@@ -27,6 +52,7 @@ class BridgewireRuntime:
         clock: Clock,
         maximum_record_bytes: int = 16,
         stop_event: threading.Event | None = None,
+        waiter: Waiter | None = None,
     ) -> None:
         self._access = access
         self._reader = reader
@@ -35,6 +61,7 @@ class BridgewireRuntime:
         self._clock = clock
         self._stream = ReaderRecordStream(maximum_record_bytes * 4)
         self._stopped = stop_event or threading.Event()
+        self._waiter = waiter or EventWaiter(clock, self._stopped)
         self._shutdown_complete = False
 
     @property
@@ -45,31 +72,28 @@ class BridgewireRuntime:
         self._access.start()
         self._health.report("degraded", reason="reader_connecting")
 
-    def run_once(self) -> None:
+    def run_once(self) -> bool:
         self._access.tick()
         if not self._reader.connected:
             if self._reader.connect_until_ready(1):
                 self._health.report("ready", reader="connected")
-            return
+                return True
+            return False
         for record in self._reader.read_records_once(self._stream):
             self._access.submit_record(
                 record,
                 source=CredentialSource.PHYSICAL_READER,
             )
         self._access.tick()
+        return False
 
-    def run(self) -> None:
+    def run(self, *, on_ready: Callable[[], None] | None = None) -> None:
         while not self.shutdown_requested:
-            self.run_once()
+            if self.run_once() and on_ready is not None:
+                on_ready()
 
     def cooperative_wait(self, seconds: float) -> bool:
-        deadline = self._clock.monotonic() + seconds
-        while self._clock.monotonic() < deadline:
-            self._access.tick()
-            remaining = max(0.0, deadline - self._clock.monotonic())
-            if self._stopped.wait(min(0.05, remaining)):
-                return False
-        return True
+        return self._waiter.wait(seconds, self._access.tick)
 
     def request_shutdown(self) -> None:
         self._stopped.set()
@@ -103,10 +127,23 @@ class BridgewireRuntime:
     def report_fault(self) -> None:
         self._health.report("faulted")
 
+    def handle_failure(self) -> None:
+        self._access._recoverable_failure()
+
     def shutdown(self) -> None:
         if self._shutdown_complete:
             return
-        self._reader.close()
-        self._access.shutdown()
-        self._health.report("stopped")
+        failures: list[BaseException] = []
+        # Secure relay state takes precedence over reader and health cleanup.
+        for cleanup in (
+            self._access.shutdown,
+            self._reader.close,
+            lambda: self._health.report("stopped"),
+        ):
+            try:
+                cleanup()
+            except BaseException as exc:
+                failures.append(exc)
+        if failures:
+            raise BaseExceptionGroup("runtime shutdown failed", failures)
         self._shutdown_complete = True

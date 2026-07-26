@@ -42,8 +42,7 @@ def parse_reader_record(record: bytes) -> ParsedRecord:
         checksum_text = record[11:13].decode("ascii", errors="strict")
     except UnicodeDecodeError as exc:
         raise ReaderRecordError("invalid_encoding") from exc
-    if len(data) != 10 or any(character not in "0123456789ABCDEF" for character in data):
-        raise ReaderRecordError("invalid_identifier")
+    parsed = parse_credential_identifier(data)
     if len(checksum_text) != 2 or any(
         character not in "0123456789ABCDEF" for character in checksum_text
     ):
@@ -53,7 +52,16 @@ def parse_reader_record(record: bytes) -> ParsedRecord:
         checksum ^= int(data[offset : offset + 2], 16)
     if checksum != int(checksum_text, 16):
         raise ReaderRecordError("checksum_mismatch")
-    return ParsedRecord(data)
+    return parsed
+
+
+def parse_credential_identifier(credential: str) -> ParsedRecord:
+    """Apply the canonical identifier rule shared by every credential source."""
+    if len(credential) != 10 or any(
+        character not in "0123456789ABCDEF" for character in credential
+    ):
+        raise ReaderRecordError("invalid_identifier")
+    return ParsedRecord(credential)
 
 
 class ReaderRecordStream:
@@ -129,10 +137,9 @@ class DiscoveryResult:
 
 
 def _matches(device: SerialDevice, identity: ReaderIdentity) -> bool:
-    if identity.by_id_path is not None and device.by_id_path == identity.by_id_path:
-        return True
+    path_matches = identity.by_id_path is not None and device.by_id_path == identity.by_id_path
     if identity.vid is None or identity.pid is None:
-        return False
+        return path_matches
     if device.vid != identity.vid or device.pid != identity.pid:
         return False
     checks = (

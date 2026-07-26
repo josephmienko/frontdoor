@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 
@@ -11,7 +10,13 @@ from bridgewire.controller import (
     ControllerState,
     PhysicalReleaseStatus,
 )
-from bridgewire.reader import ParsedRecord, RecordResult
+from bridgewire.reader import (
+    MalformedRecord,
+    ParsedRecord,
+    ReaderRecordError,
+    RecordResult,
+    parse_credential_identifier,
+)
 
 
 class CredentialSource(StrEnum):
@@ -23,13 +28,14 @@ class CredentialSource(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AccessServiceResult:
-    accepted: bool
+    authorized: bool
     authorization: AuthorizationOutcome | None
+    malformed: bool
     controller_state: ControllerState
     physical_release: PhysicalReleaseStatus
-    release_initiated: bool
+    relay_actuation_requested: bool
+    relay_actuation_succeeded: bool
     source: CredentialSource
-    audit_event_id: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -57,13 +63,17 @@ class AccessService:
         *,
         source: CredentialSource,
     ) -> AccessServiceResult:
-        return self._map(self._controller.process(record), source)
+        return self._map(
+            self._controller.process(record),
+            source,
+            malformed=isinstance(record, MalformedRecord),
+        )
 
     def submit_parsed_record(
         self,
         record: ParsedRecord,
         *,
-        source: CredentialSource = CredentialSource.PHYSICAL_READER,
+        source: CredentialSource,
     ) -> AccessServiceResult:
         return self.submit_record(record, source=source)
 
@@ -73,25 +83,39 @@ class AccessService:
         *,
         source: CredentialSource,
     ) -> AccessServiceResult:
-        if re.fullmatch(r"[0-9A-F]{10}", credential) is None:
-            raise ValueError("credential must be ten uppercase hexadecimal characters")
-        return self.submit_parsed_record(ParsedRecord(credential), source=source)
+        try:
+            record: RecordResult = parse_credential_identifier(credential)
+        except ReaderRecordError as exc:
+            record = MalformedRecord(exc.reason)
+        return self.submit_record(record, source=source)
 
     def tick(self) -> None:
         self._controller.tick()
 
-    def recoverable_failure(self) -> None:
+    def _recoverable_failure(self) -> None:
         self._controller.recoverable_failure()
 
     def shutdown(self) -> None:
         self._controller.shutdown()
 
-    def _map(self, result: AccessResult, source: CredentialSource) -> AccessServiceResult:
+    def _map(
+        self,
+        result: AccessResult,
+        source: CredentialSource,
+        *,
+        malformed: bool,
+    ) -> AccessServiceResult:
         return AccessServiceResult(
-            accepted=result.authorization is AuthorizationOutcome.AUTHORIZED,
+            authorized=result.authorization is AuthorizationOutcome.AUTHORIZED,
             authorization=result.authorization,
+            malformed=malformed,
             controller_state=self._controller.state,
             physical_release=result.physical_release,
-            release_initiated=(result.physical_release is PhysicalReleaseStatus.ASSERTED),
+            relay_actuation_requested=result.physical_release
+            in {
+                PhysicalReleaseStatus.ASSERTED,
+                PhysicalReleaseStatus.ACTUATION_FAILED,
+            },
+            relay_actuation_succeeded=(result.physical_release is PhysicalReleaseStatus.ASSERTED),
             source=source,
         )

@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-07-26)
+
+### Bug Fixes
+
+- Preserve API lifecycle failure states
+  ([`6a6a3c3`](https://github.com/josephmienko/frontdoor/commit/6a6a3c3940866721428fad1905dc969d9ea6d134))
+
+### Features
+
+- Integrate isolated production API host
+  ([`2a3d560`](https://github.com/josephmienko/frontdoor/commit/2a3d56029ee764be8a6db55ed23c2a1dc68cf588))
+
+
 ## v1.4.0 (2026-07-26)
 
 ### Bug Fixes

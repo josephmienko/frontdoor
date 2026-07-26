@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from bridgewire.adapters.health.file_reporter import FileHealthReporter
+from bridgewire.adapters.http.uvicorn_server import (
+    ApiServerLifecycleError,
+    ApiServerShutdownTimeout,
+    ApiServerSnapshot,
+    ApiServerStartupError,
+    ApiServerStartupTimeout,
+    ApiServerState,
+    UvicornThreadServer,
+)
 from bridgewire.adapters.reader.posix_serial import (
     UDEVADM_TIMEOUT_SECONDS,
     PosixSerialSession,
@@ -50,6 +61,161 @@ class FakeGpio:
 
     def cleanup(self, channel: int) -> None:
         self.calls.append(("cleanup", channel))
+
+
+@pytest.mark.unit
+def test_uvicorn_lifecycle_is_explicit_idempotent_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class Server:
+        started = False
+        should_exit = False
+
+        def __init__(self, config: object) -> None:
+            observed["config"] = config
+
+        def run(self) -> None:
+            self.started = True
+            while not self.should_exit:
+                import time
+
+                time.sleep(0.001)
+
+    def config(_app: object, **kwargs: object) -> object:
+        observed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("bridgewire.adapters.http.uvicorn_server.uvicorn.Config", config)
+    monkeypatch.setattr("bridgewire.adapters.http.uvicorn_server.uvicorn.Server", Server)
+    server = UvicornThreadServer(
+        object(),  # type: ignore[arg-type]
+        host="127.0.0.1",
+        port=8080,
+        startup_timeout_seconds=0.1,
+        shutdown_timeout_seconds=0.1,
+    )
+    server.start()
+    assert server.snapshot().state is ApiServerState.RUNNING
+    with pytest.raises(ApiServerLifecycleError):
+        server.start()
+    server.stop()
+    server.stop()
+    assert server.snapshot().state is ApiServerState.STOPPED
+    with pytest.raises(ApiServerLifecycleError):
+        server.start()
+    assert observed["host"] == "127.0.0.1"
+    assert observed["port"] == 8080
+
+
+@pytest.mark.unit
+def test_uvicorn_retains_thread_failure_before_and_after_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before_failure = OSError("before startup")
+
+    class BeforeServer:
+        started = False
+        should_exit = False
+
+        def __init__(self, _config: object) -> None:
+            pass
+
+        def run(self) -> None:
+            raise before_failure
+
+    monkeypatch.setattr(
+        "bridgewire.adapters.http.uvicorn_server.uvicorn.Config",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr("bridgewire.adapters.http.uvicorn_server.uvicorn.Server", BeforeServer)
+    before = UvicornThreadServer(
+        object(),  # type: ignore[arg-type]
+        host="127.0.0.1",
+        port=8080,
+        startup_timeout_seconds=0.1,
+        shutdown_timeout_seconds=0.1,
+    )
+    with pytest.raises(ApiServerStartupError):
+        before.start()
+    snapshot = before.snapshot()
+    assert snapshot.state is ApiServerState.START_FAILED
+    assert before_failure in snapshot.failures
+    with pytest.raises(ApiServerLifecycleError):
+        before.start()
+
+    after_failure = OSError("after startup")
+    release = threading.Event()
+
+    class AfterServer:
+        started = False
+        should_exit = False
+
+        def __init__(self, _config: object) -> None:
+            pass
+
+        def run(self) -> None:
+            self.started = True
+            release.wait(1)
+            raise after_failure
+
+    monkeypatch.setattr("bridgewire.adapters.http.uvicorn_server.uvicorn.Server", AfterServer)
+    after = UvicornThreadServer(
+        object(),  # type: ignore[arg-type]
+        host="127.0.0.1",
+        port=8080,
+        startup_timeout_seconds=0.1,
+        shutdown_timeout_seconds=0.1,
+    )
+    after.start()
+    release.set()
+    deadline = time.monotonic() + 1
+    while after.snapshot().state is ApiServerState.RUNNING and time.monotonic() < deadline:
+        time.sleep(0.001)
+    snapshot = after.snapshot()
+    assert snapshot.state is ApiServerState.FAILED
+    assert after_failure in snapshot.failures
+
+
+@pytest.mark.unit
+def test_uvicorn_timeout_retains_lingering_thread_for_later_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = threading.Event()
+
+    class Server:
+        started = False
+        should_exit = False
+
+        def __init__(self, _config: object) -> None:
+            pass
+
+        def run(self) -> None:
+            release.wait(1)
+
+    monkeypatch.setattr(
+        "bridgewire.adapters.http.uvicorn_server.uvicorn.Config",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr("bridgewire.adapters.http.uvicorn_server.uvicorn.Server", Server)
+    server = UvicornThreadServer(
+        object(),  # type: ignore[arg-type]
+        host="127.0.0.1",
+        port=8080,
+        startup_timeout_seconds=0.01,
+        shutdown_timeout_seconds=0.01,
+    )
+    with pytest.raises(ApiServerStartupTimeout):
+        server.start()
+    assert server.snapshot().state is ApiServerState.START_TIMED_OUT
+    assert server.snapshot().thread_alive
+    with pytest.raises(ApiServerShutdownTimeout):
+        server.stop()
+    assert server.snapshot().state is ApiServerState.STOP_TIMED_OUT
+    release.set()
+    server.stop()
+    assert server.snapshot().state is ApiServerState.STOPPED
 
 
 @pytest.mark.unit
@@ -255,6 +421,9 @@ def test_hardware_composition_runs_full_path_and_shuts_down_low(
             open_reader=lambda _path: Session(),
             install_signals=False,
             stop_event=stop,
+            api_server_factory=lambda *_args: pytest.fail(
+                "disabled API must not construct a server"
+            ),
         )
         == 0
     )
@@ -281,3 +450,246 @@ def test_hardware_composition_runs_full_path_and_shuts_down_low(
     assert gpio.calls[-2:] == [("output", 23, gpio.LOW), ("cleanup", 23)]
     assert "0102030405" not in audit_path.read_bytes().decode("latin1")
     assert '"status": "stopped"' in (tmp_path / "health.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("fail_start", "fail_stop"), [(True, False), (False, True)])
+def test_optional_api_failure_cannot_skip_processing_or_relay_cleanup(
+    tmp_path: Path,
+    repo_root: Path,
+    authorization_fixture_root: Path,
+    schema_root: Path,
+    fail_start: bool,
+    fail_stop: bool,
+) -> None:
+    import threading
+
+    stop = threading.Event()
+    source = (repo_root / "configs" / "hardware-bench.toml").read_text(encoding="utf-8")
+    config_path = tmp_path / "hardware-api.toml"
+    config_path.write_text(
+        source.replace("enabled = false", "enabled = true"),
+        encoding="utf-8",
+    )
+    stable = Path("/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0")
+
+    class Session:
+        calls = 0
+
+        def read(self) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return b"\x02010203040501\r\n\x03"
+            stop.set()
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    lifecycle: list[str] = []
+
+    class OrderedGpio(FakeGpio):
+        def output(self, channel: int, level: int) -> None:
+            if level == self.LOW and ("output", channel, self.HIGH) in self.calls:
+                lifecycle.append("relay_low")
+            super().output(channel, level)
+
+        def cleanup(self, channel: int) -> None:
+            lifecycle.append("relay_cleanup")
+            super().cleanup(channel)
+
+    gpio = OrderedGpio()
+
+    class ApiServer:
+        error: OSError | None = None
+
+        def start(self) -> None:
+            lifecycle.append("api_start")
+            if fail_start:
+                self.error = OSError("API startup failed")
+                raise self.error
+
+        def stop(self) -> None:
+            lifecycle.append("api_stop")
+            assert ("output", 23, gpio.LOW) in gpio.calls
+            if fail_stop:
+                self.error = OSError("API shutdown failed")
+                raise self.error
+
+        def snapshot(self) -> ApiServerSnapshot:
+            return ApiServerSnapshot(
+                (
+                    ApiServerState.STOP_TIMED_OUT
+                    if fail_stop and self.error is not None
+                    else ApiServerState.START_FAILED
+                    if fail_start and self.error is not None
+                    else ApiServerState.RUNNING
+                ),
+                False,
+                (self.error,) if self.error is not None else (),
+            )
+
+    def factory(_app: object, host: str, port: int) -> ApiServer:
+        assert (host, port) == ("127.0.0.1", 8080)
+        return ApiServer()
+
+    with pytest.raises(BaseException, match="API"):
+        run_hardware_service(
+            config_path=config_path,
+            authorization_path=authorization_fixture_root / "valid.csv",
+            schema_path=schema_root / "authorization-file" / "schema.json",
+            audit_path=tmp_path / "audit.sqlite3",
+            notification_path=tmp_path / "notifications.jsonl",
+            health_path=tmp_path / "health.json",
+            gpio=gpio,
+            enumerate_devices=lambda: [
+                SerialDevice(Path("/dev/ttyUSB0"), stable, vid=0x1A86, pid=0x7523)
+            ],
+            open_reader=lambda _path: Session(),
+            install_signals=False,
+            stop_event=stop,
+            api_server_factory=factory,
+        )
+    assert ("output", 23, gpio.HIGH) in gpio.calls
+    assert gpio.calls[-2:] == [("output", 23, gpio.LOW), ("cleanup", 23)]
+    assert lifecycle[0] == "api_start"
+    assert lifecycle.index("relay_low") < lifecycle.index("relay_cleanup")
+    assert lifecycle.index("relay_cleanup") < lifecycle.index("api_stop")
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "target",
+    [
+        "SQLiteAuditReader",
+        "StatusService",
+        "ReadOnlyQueryService",
+        "create_app",
+        "UvicornThreadServer",
+    ],
+)
+def test_complete_api_construction_is_isolated_from_hardware_processing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repo_root: Path,
+    authorization_fixture_root: Path,
+    schema_root: Path,
+    target: str,
+) -> None:
+    stop = threading.Event()
+    source = (repo_root / "configs" / "hardware-bench.toml").read_text(encoding="utf-8")
+    config_path = tmp_path / "hardware-api.toml"
+    config_path.write_text(
+        source.replace("enabled = false", "enabled = true"),
+        encoding="utf-8",
+    )
+    failure = OSError(f"{target} failed")
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(f"bridgewire.hardware_service.{target}", fail)
+    stable = Path("/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0")
+
+    class Session:
+        calls = 0
+
+        def read(self) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return b"\x02010203040501\r\n\x03"
+            stop.set()
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    gpio = FakeGpio()
+    with pytest.raises(BaseException, match=target):
+        run_hardware_service(
+            config_path=config_path,
+            authorization_path=authorization_fixture_root / "valid.csv",
+            schema_path=schema_root / "authorization-file" / "schema.json",
+            audit_path=tmp_path / "audit.sqlite3",
+            notification_path=tmp_path / "notifications.jsonl",
+            health_path=tmp_path / "health.json",
+            gpio=gpio,
+            enumerate_devices=lambda: [
+                SerialDevice(Path("/dev/ttyUSB0"), stable, vid=0x1A86, pid=0x7523)
+            ],
+            open_reader=lambda _path: Session(),
+            install_signals=False,
+            stop_event=stop,
+        )
+    assert ("output", 23, gpio.HIGH) in gpio.calls
+    assert gpio.calls[-2:] == [("output", 23, gpio.LOW), ("cleanup", 23)]
+
+
+@pytest.mark.integration
+def test_api_runtime_failure_is_observed_while_hardware_continues(
+    tmp_path: Path,
+    repo_root: Path,
+    authorization_fixture_root: Path,
+    schema_root: Path,
+) -> None:
+    stop = threading.Event()
+    source = (repo_root / "configs" / "hardware-bench.toml").read_text(encoding="utf-8")
+    config_path = tmp_path / "hardware-api.toml"
+    config_path.write_text(
+        source.replace("enabled = false", "enabled = true"),
+        encoding="utf-8",
+    )
+    stable = Path("/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0")
+
+    class Session:
+        calls = 0
+
+        def read(self) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return b"\x02010203040501\r\n\x03"
+            stop.set()
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    api_failure = OSError("sensitive bind detail")
+
+    class ApiServer:
+        observations = 0
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def snapshot(self) -> ApiServerSnapshot:
+            self.observations += 1
+            if self.observations >= 2:
+                return ApiServerSnapshot(ApiServerState.FAILED, False, (api_failure,))
+            return ApiServerSnapshot(ApiServerState.RUNNING, True, ())
+
+    gpio = FakeGpio()
+    health_path = tmp_path / "health.json"
+    with pytest.raises(BaseException, match="sensitive bind detail"):
+        run_hardware_service(
+            config_path=config_path,
+            authorization_path=authorization_fixture_root / "valid.csv",
+            schema_path=schema_root / "authorization-file" / "schema.json",
+            audit_path=tmp_path / "audit.sqlite3",
+            notification_path=tmp_path / "notifications.jsonl",
+            health_path=health_path,
+            gpio=gpio,
+            enumerate_devices=lambda: [
+                SerialDevice(Path("/dev/ttyUSB0"), stable, vid=0x1A86, pid=0x7523)
+            ],
+            open_reader=lambda _path: Session(),
+            install_signals=False,
+            stop_event=stop,
+            api_server_factory=lambda _app, _host, _port: ApiServer(),
+        )
+    assert ("output", 23, gpio.HIGH) in gpio.calls
+    assert gpio.calls[-2:] == [("output", 23, gpio.LOW), ("cleanup", 23)]
+    assert "sensitive bind detail" not in health_path.read_text(encoding="utf-8")

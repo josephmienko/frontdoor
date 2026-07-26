@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-07-26)
+
+### Bug Fixes
+
+- Harden runtime shutdown and access service contracts
+  ([`16f5bf0`](https://github.com/josephmienko/frontdoor/commit/16f5bf0485a3124a1ee9cfd0b80f358d42f34e56))
+
+### Documentation
+
+- Record after-hours hardware deployment checklist
+  ([`337863c`](https://github.com/josephmienko/frontdoor/commit/337863ca50fa1e643ea88b951e2ec994fb07c4dd))
+
+### Features
+
+- Add read/query services
+  ([`e11cad6`](https://github.com/josephmienko/frontdoor/commit/e11cad629abe7225c7d05f577dd6c574e31db122))
+
+### Refactoring
+
+- Extract application runtime boundary
+  ([`12ba74a`](https://github.com/josephmienko/frontdoor/commit/12ba74a88fa8ebd9bc5f95dd95abaf29f509e2e2))
+
+
 ## v1.2.1 (2026-07-25)
 
 ### Bug Fixes

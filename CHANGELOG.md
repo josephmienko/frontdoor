@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-07-26)
+
+### Bug Fixes
+
+- Clarify status timing and lifecycle metadata
+  ([`e85e3d3`](https://github.com/josephmienko/frontdoor/commit/e85e3d3d617684ab201e3f839979e961a169c41b))
+
+- Harden API freshness pagination and errors
+  ([`657cddf`](https://github.com/josephmienko/frontdoor/commit/657cddff442bc190cf84dea3e3c64ef46d97ca7c))
+
+### Features
+
+- Add read-only status and audit API
+  ([`3712734`](https://github.com/josephmienko/frontdoor/commit/371273426f108b48dd693cc459f1a14abe876459))
+
+### Refactoring
+
+- Publish concurrency-safe operational snapshots
+  ([`2160d0b`](https://github.com/josephmienko/frontdoor/commit/2160d0ba7d1a279be554ff7f58c549879de8d511))
+
+
 ## v1.3.0 (2026-07-26)
 
 ### Bug Fixes

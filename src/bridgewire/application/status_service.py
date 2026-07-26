@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
 from bridgewire.authorization import AuthorizationSnapshot
-from bridgewire.controller import ControllerSnapshot, ControllerState
+from bridgewire.controller import ControllerSnapshot, ControllerState, RelayCommand
 from bridgewire.interfaces import Clock
 from bridgewire.reader import ReaderHealthState, ReaderSnapshot
 
@@ -36,13 +36,13 @@ class StatusSnapshot:
     controller_state: ControllerState
     reader_connected: bool
     reader_health: ReaderHealthState
-    last_successful_credential_processing_at: datetime | None
+    last_credential_processed_at: datetime | None
     last_reader_record_age_seconds: float | None
     release_active: bool
-    release_deadline: float | None
+    release_deadline_at: datetime | None
     release_remaining_seconds: float | None
     configured_release_seconds: float
-    last_relay_command_high: bool | None
+    last_relay_command: RelayCommand | None
     authorization_loaded: bool
     authorization_record_count: int
     authorization_version: str | None
@@ -78,30 +78,40 @@ class StatusService:
         notifications: NotificationStatusSource,
         clock: Clock,
         software_version: str,
+        application_started_at: datetime,
     ) -> None:
+        if application_started_at.tzinfo is None or application_started_at.utcoffset() is None:
+            raise ValueError("application start timestamp must be timezone-aware")
         self._controller = controller
         self._reader = reader
         self._authorization = authorization
         self._audit = audit
         self._notifications = notifications
-        self._started_at = clock.now()
+        self._clock = clock
+        self._started_at = application_started_at
         self._software_version = software_version
 
     def snapshot(self) -> StatusSnapshot:
         controller = self._controller.snapshot()
         reader = self._reader.snapshot()
         authorization = self._authorization.snapshot()
+        now = self._clock.now()
+        deadline_at = (
+            now + timedelta(seconds=controller.release_remaining_seconds)
+            if controller.release_remaining_seconds is not None
+            else None
+        )
         return StatusSnapshot(
             controller_state=controller.state,
             reader_connected=reader.connected,
             reader_health=reader.health_state,
-            last_successful_credential_processing_at=controller.last_credential_processed_at,
+            last_credential_processed_at=controller.last_credential_processed_at,
             last_reader_record_age_seconds=reader.last_record_age_seconds,
             release_active=controller.release_active,
-            release_deadline=controller.release_deadline,
+            release_deadline_at=deadline_at,
             release_remaining_seconds=controller.release_remaining_seconds,
             configured_release_seconds=controller.configured_release_seconds,
-            last_relay_command_high=controller.last_relay_command_high,
+            last_relay_command=controller.last_relay_command,
             authorization_loaded=authorization.loaded,
             authorization_record_count=authorization.record_count,
             authorization_version=authorization.version,

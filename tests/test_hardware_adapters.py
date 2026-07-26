@@ -1,14 +1,29 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from bridgewire.adapters.health.file_reporter import FileHealthReporter
+from bridgewire.adapters.reader.posix_serial import (
+    UDEVADM_TIMEOUT_SECONDS,
+    PosixSerialSession,
+    _serial_device_from_by_id,
+    enumerate_serial_devices,
+)
 from bridgewire.audit import AuditEvent, EventType, Severity, SQLiteAuditSink
 from bridgewire.cli import main
 from bridgewire.gpio import RaspberryPiRelay
-from bridgewire.hardware_service import _serial_device_from_by_id, run_hardware_service
+from bridgewire.hardware_service import (
+    PosixSerialSession as CompatibilityPosixSerialSession,
+)
+from bridgewire.hardware_service import (
+    enumerate_serial_devices as compatibility_enumerate_serial_devices,
+)
+from bridgewire.hardware_service import run_hardware_service
 from bridgewire.reader import SerialDevice
 
 
@@ -94,14 +109,76 @@ def test_udev_identity_populates_non_unique_ch340_metadata(
             "ID_MODEL=USB_Serial",
         ]
     )
+    observed: dict[str, object] = {}
+
+    def check_output(*_args: object, **kwargs: object) -> str:
+        observed.update(kwargs)
+        return output
+
     monkeypatch.setattr(
-        "bridgewire.hardware_service.subprocess.check_output",
-        lambda *_args, **_kwargs: output,
+        "bridgewire.adapters.reader.posix_serial.subprocess.check_output", check_output
     )
-    device = _serial_device_from_by_id(
-        Path("/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0")
-    )
+    device = _serial_device_from_by_id(Path("/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"))
+    assert device is not None
     assert (device.vid, device.pid, device.serial_number) == (0x1A86, 0x7523, None)
+    assert observed["timeout"] == UDEVADM_TIMEOUT_SECONDS == 0.5
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.CalledProcessError(1, ["udevadm"]),
+        subprocess.TimeoutExpired(["udevadm"], 0.5),
+        OSError("udevadm unavailable"),
+    ],
+)
+def test_udev_discovery_failures_are_bounded_and_skipped(
+    monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise failure
+
+    monkeypatch.setattr("bridgewire.adapters.reader.posix_serial.subprocess.check_output", fail)
+    assert _serial_device_from_by_id(Path("/dev/serial/by-id/example")) is None
+
+
+@pytest.mark.unit
+def test_health_report_contains_utc_freshness_timestamp(tmp_path: Path) -> None:
+    instant = datetime(2026, 7, 25, 19, 30, tzinfo=UTC)
+    path = tmp_path / "health.json"
+    FileHealthReporter(path, now=lambda: instant).report("ready", reader="connected")
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "reader": "connected",
+        "reported_at": "2026-07-25T19:30:00+00:00",
+        "status": "ready",
+    }
+
+
+@pytest.mark.unit
+def test_health_atomic_replace_failure_preserves_previous_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "health.json"
+    path.write_text('{"status":"old"}\n', encoding="utf-8")
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("bridgewire.adapters.health.file_reporter.os.replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        FileHealthReporter(path).report("ready")
+    assert path.read_text(encoding="utf-8") == '{"status":"old"}\n'
+    assert list(tmp_path.glob(".health-*")) == []
+
+
+@pytest.mark.unit
+def test_hardware_service_compatibility_exports_are_deliberate() -> None:
+    import bridgewire.hardware_service as hardware_service
+
+    assert CompatibilityPosixSerialSession is PosixSerialSession
+    assert compatibility_enumerate_serial_devices is enumerate_serial_devices
+    assert "_serial_device_from_by_id" not in hardware_service.__all__
 
 
 @pytest.mark.unit
@@ -172,7 +249,9 @@ def test_hardware_composition_runs_full_path_and_shuts_down_low(
             notification_path=tmp_path / "notifications.jsonl",
             health_path=tmp_path / "health.json",
             gpio=gpio,
-            enumerate_devices=lambda: [SerialDevice(Path("/dev/ttyUSB0"), stable)],
+            enumerate_devices=lambda: [
+                SerialDevice(Path("/dev/ttyUSB0"), stable, vid=0x1A86, pid=0x7523)
+            ],
             open_reader=lambda _path: Session(),
             install_signals=False,
             stop_event=stop,

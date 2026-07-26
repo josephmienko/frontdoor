@@ -50,6 +50,11 @@ the project environment, and rerun `poetry install`.
 
 ## Design and safety
 
+Bridgewire is a modular monolith: the controller, authorization source, reader,
+relay, audit sink, and notification queue communicate in-process through typed
+ports. The reusable runtime and application boundary are described in
+[architecture refactor through Increment 3](docs/architecture-refactor-increment-3.md).
+
 The core depends on typed interfaces and an injected monotonic clock. Tests
 never wait in real time. Startup explicitly commands BCM23 LOW before
 credential handling; shutdown attempts LOW before cleanup. HIGH is requested

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -50,6 +51,10 @@ class ApiServerStartupTimeout(ApiServerStartupError):
     pass
 
 
+class ApiServerStartupCancelled(ApiServerStartupError):
+    pass
+
+
 class ApiServerShutdownTimeout(ApiServerError):
     pass
 
@@ -73,6 +78,7 @@ class UvicornThreadServer:
         port: int,
         startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
         shutdown_timeout_seconds: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+        thread_factory: Callable[..., threading.Thread] | None = None,
     ) -> None:
         if startup_timeout_seconds <= 0 or shutdown_timeout_seconds <= 0:
             raise ValueError("API lifecycle timeouts must be positive")
@@ -88,11 +94,13 @@ class UvicornThreadServer:
         self._lock = threading.Lock()
         self._state = ApiServerState.NEW
         self._failures: list[BaseException] = []
-        self._thread = threading.Thread(
+        make_thread = thread_factory or threading.Thread
+        self._thread = make_thread(
             target=self._thread_main,
             name="bridgewire-read-only-api",
             daemon=True,
         )
+        self._stop_complete = threading.Event()
         self._startup_timeout_seconds = startup_timeout_seconds
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
 
@@ -119,23 +127,36 @@ class UvicornThreadServer:
         deadline = time.monotonic() + self._startup_timeout_seconds
         while self._thread.is_alive() and not self._server.started and time.monotonic() < deadline:
             time.sleep(0.01)
+        startup_error: ApiServerStartupError | None = None
+        failure: BaseException | None = None
         with self._lock:
             state = self._state
             failure = self._failures[-1] if self._failures else None
-            if self._server.started and state is ApiServerState.STARTING:
+            if state is ApiServerState.START_FAILED:
+                startup_error = ApiServerStartupError("API server failed during startup")
+            elif state is ApiServerState.FAILED:
+                startup_error = ApiServerStartupError("API server failed immediately after startup")
+            elif state in {ApiServerState.STOPPING, ApiServerState.STOPPED}:
+                startup_error = ApiServerStartupCancelled("API server startup was cancelled")
+            elif self._server.started and state is ApiServerState.STARTING:
                 self._state = ApiServerState.RUNNING
                 return
-        if not self._thread.is_alive():
-            raise ApiServerStartupError("API server exited before startup") from failure
-        timeout = ApiServerStartupTimeout("API server startup timed out")
-        with self._lock:
-            self._failures.append(timeout)
-            self._state = ApiServerState.START_TIMED_OUT
+            elif not self._thread.is_alive():
+                startup_error = ApiServerStartupError("API server exited before startup")
+            else:
+                timeout = ApiServerStartupTimeout("API server startup timed out")
+                self._failures.append(timeout)
+                self._state = ApiServerState.START_TIMED_OUT
+                startup_error = timeout
+        if not isinstance(startup_error, ApiServerStartupTimeout):
+            assert startup_error is not None
+            raise startup_error from failure
         self._server.should_exit = True
         self._thread.join(self._shutdown_timeout_seconds)
-        raise timeout
+        raise startup_error
 
     def stop(self) -> None:
+        wait_for_existing_stop = False
         with self._lock:
             state = self._state
             alive = self._thread.is_alive()
@@ -151,18 +172,33 @@ class UvicornThreadServer:
             if not alive:
                 self._state = ApiServerState.STOPPED
                 return
-            self._state = ApiServerState.STOPPING
-            self._server.should_exit = True
+            if state is ApiServerState.STOPPING:
+                wait_for_existing_stop = True
+            else:
+                self._state = ApiServerState.STOPPING
+                self._stop_complete.clear()
+                self._server.should_exit = True
+        if wait_for_existing_stop:
+            self._stop_complete.wait(self._shutdown_timeout_seconds)
+            with self._lock:
+                if self._state is ApiServerState.STOP_TIMED_OUT:
+                    failure = self._failures[-1]
+                    assert isinstance(failure, ApiServerShutdownTimeout)
+                    raise failure
+                return
         self._thread.join(self._shutdown_timeout_seconds)
         with self._lock:
             if self._thread.is_alive():
                 timeout = ApiServerShutdownTimeout("API server shutdown timed out")
                 self._failures.append(timeout)
                 self._state = ApiServerState.STOP_TIMED_OUT
+                self._stop_complete.set()
                 raise timeout
             self._state = ApiServerState.STOPPED
+            self._stop_complete.set()
 
     def _thread_main(self) -> None:
+        log_message: str | None = None
         try:
             self._server.run()
         except BaseException as exc:
@@ -170,12 +206,13 @@ class UvicornThreadServer:
                 self._failures.append(exc)
                 self._state = (
                     ApiServerState.START_FAILED
-                    if self._state is ApiServerState.STARTING
+                    if self._state is ApiServerState.STARTING and not self._server.started
                     else ApiServerState.FAILED
                 )
+                state = self._state
             logger.error(
                 "read-only API thread failed",
-                extra={"api_state": self._state.value},
+                extra={"api_state": state.value},
                 exc_info=True,
             )
             return
@@ -188,9 +225,11 @@ class UvicornThreadServer:
                 runtime_failure = ApiServerError("API server exited unexpectedly")
                 self._failures.append(runtime_failure)
                 self._state = ApiServerState.FAILED
-                logger.error(
-                    "read-only API server exited unexpectedly",
-                    extra={"api_state": self._state.value},
-                )
+                log_message = "read-only API server exited unexpectedly"
             elif self._state is ApiServerState.STOPPING:
                 self._state = ApiServerState.STOPPED
+        if log_message is not None:
+            logger.error(
+                log_message,
+                extra={"api_state": ApiServerState.FAILED.value},
+            )

@@ -71,11 +71,13 @@ An API shutdown timeout is reported only after the relay-secure attempts.
 Uvicorn never owns or invokes GPIO cleanup. No separate API command, background
 control worker, or systemd unit is introduced.
 
-Startup waits at most two seconds for Uvicorn readiness. Shutdown joins for at
-most five seconds. A failed startup can therefore delay initial reader
-processing by this bounded startup interval and a bounded cleanup attempt, but
-cannot prevent the reader loop from starting. Server adapter instances cannot
-be restarted; a process-level restart constructs a new container and adapter.
+Startup waits at most two seconds for Uvicorn readiness. If readiness fails,
+the initial cleanup join can take up to five additional seconds. The
+worst-case bounded delay before reader processing is therefore approximately
+seven seconds. The relay has already been secured before this optional API
+attempt, and an API failure cannot terminate access control. Shutdown joins
+for at most five seconds. Server adapter instances cannot be restarted; a
+process-level restart constructs a new container and adapter.
 
 The API thread is daemonized only as a last-resort bounded-exit escape hatch.
 Graceful shutdown and a bounded join are always attempted. If a thread remains
@@ -86,6 +88,11 @@ cleanup have already been attempted. Audit closure remains independent.
 Authentication and TLS are not implemented. Loopback remains the default,
 control routes remain unsupported, and systemd/deployment integration is
 explicitly deferred.
+
+File-health output gained additive `api` and `access_control` fields. Existing
+JSON consumers that tolerate unknown fields remain compatible; consumers that
+reject unknown fields may require adjustment. The file-health schema is not
+currently formally versioned.
 
 Audit reads use a one-second SQLite busy timeout. Expected database
 availability failures become a sanitized `503`; SQL, exception text, and paths

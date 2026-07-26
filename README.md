@@ -89,10 +89,13 @@ The concurrency and deployment boundaries are documented in the
 Uvicorn only when `[api].enabled = true`; the default remains disabled and
 loopback-only. The hardware host retains sole ownership of fail-secure relay
 cleanup. API lifecycle failures are logged and reported as degraded while
-local credential processing continues. Uvicorn startup and shutdown are
-bounded to two and five seconds respectively; its daemon thread is a
-last-resort process-exit escape hatch after relay cleanup. Authentication, TLS,
-control routes, systemd, and deployment integration remain deferred.
+local credential processing continues. The readiness wait is bounded to two
+seconds; a failed-start cleanup join can then take up to five additional
+seconds, for an approximately seven-second worst-case delay before reader
+processing begins. The relay is already secured before that optional startup
+attempt. Shutdown joining is bounded to five seconds, and the daemon thread is
+a last-resort process-exit escape hatch after relay cleanup. Authentication,
+TLS, control routes, systemd, and deployment integration remain deferred.
 
 ## Contributions and releases
 

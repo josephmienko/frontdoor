@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from io import StringIO
 from pathlib import Path
 
@@ -130,10 +131,57 @@ def test_failed_reload_retains_last_valid_set(
 ) -> None:
     store = AuthorizationStore(AuthorizationFile(schema))
     store.reload(authorization_fixture_root / "valid.csv")
+    before = store.snapshot()
     with pytest.raises(AuthorizationError):
         store.reload(authorization_fixture_root / "malformed.csv")
+    assert store.snapshot() == before
     assert store.record_count == 2
     assert store.classify("0102030405") == AuthorizationOutcome.AUTHORIZED
+
+
+@pytest.mark.unit
+def test_authorization_snapshot_is_atomic_during_concurrent_reload(
+    schema: dict[str, object],
+    authorization_fixture_root: Path,
+) -> None:
+    store = AuthorizationStore(AuthorizationFile(schema))
+    first = authorization_fixture_root / "valid.csv"
+    second = authorization_fixture_root / "valid_multiple_records.csv"
+    store.reload(first)
+    expected: set[tuple[int, str | None, object]] = set()
+    for path in (first, second):
+        store.reload(path)
+        snapshot = store.snapshot()
+        expected.add(
+            (
+                snapshot.record_count,
+                snapshot.source_revision,
+                snapshot.source_modified_at,
+            )
+        )
+    observed: set[tuple[int, str | None, object]] = set()
+    finished = threading.Event()
+
+    def reload_repeatedly() -> None:
+        for _ in range(50):
+            store.reload(first)
+            store.reload(second)
+        finished.set()
+
+    worker = threading.Thread(target=reload_repeatedly)
+    worker.start()
+    while not finished.is_set():
+        snapshot = store.snapshot()
+        observed.add(
+            (
+                snapshot.record_count,
+                snapshot.source_revision,
+                snapshot.source_modified_at,
+            )
+        )
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert observed <= expected
 
 
 @pytest.mark.unit

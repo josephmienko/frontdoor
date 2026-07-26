@@ -1,22 +1,56 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from threading import Lock
 from typing import Protocol
 
 from bridgewire.authorization import AuthorizationSnapshot
-from bridgewire.controller import ControllerSnapshot, ControllerState
+from bridgewire.controller import ControllerSnapshot, ControllerState, RelayCommand
 from bridgewire.interfaces import Clock
 from bridgewire.reader import ReaderHealthState, ReaderSnapshot
 
 
-class ControllerSnapshotSource(Protocol):
-    def snapshot(self) -> ControllerSnapshot: ...
+@dataclass(frozen=True, slots=True)
+class OperationalSnapshot:
+    controller: ControllerSnapshot
+    reader: ReaderSnapshot
+    published_at: datetime
+    last_reader_record_at: datetime | None
 
 
-class ReaderSnapshotSource(Protocol):
-    def snapshot(self) -> ReaderSnapshot: ...
+class OperationalSnapshotSource(Protocol):
+    def snapshot(self) -> OperationalSnapshot | None: ...
+
+
+class OperationalSnapshotStore:
+    """Thread-safe publication boundary for live controller and reader state."""
+
+    def __init__(self, initial: OperationalSnapshot | None = None) -> None:
+        self._snapshot = initial
+        self._lock = Lock()
+
+    def publish(
+        self,
+        controller: ControllerSnapshot,
+        reader: ReaderSnapshot,
+        published_at: datetime,
+    ) -> None:
+        if published_at.tzinfo is None or published_at.utcoffset() is None:
+            raise ValueError("snapshot publication timestamp must be timezone-aware")
+        normalized = published_at.astimezone(UTC)
+        last_record_at = (
+            normalized - timedelta(seconds=reader.last_record_age_seconds)
+            if reader.last_record_age_seconds is not None
+            else None
+        )
+        with self._lock:
+            self._snapshot = OperationalSnapshot(controller, reader, normalized, last_record_at)
+
+    def snapshot(self) -> OperationalSnapshot | None:
+        with self._lock:
+            return self._snapshot
 
 
 class AuthorizationSnapshotSource(Protocol):
@@ -36,17 +70,19 @@ class StatusSnapshot:
     controller_state: ControllerState
     reader_connected: bool
     reader_health: ReaderHealthState
-    last_successful_credential_processing_at: datetime | None
+    snapshot_published_at: datetime
+    snapshot_age_seconds: float
+    last_credential_processed_at: datetime | None
     last_reader_record_age_seconds: float | None
     release_active: bool
-    release_deadline: float | None
+    release_deadline_at: datetime | None
     release_remaining_seconds: float | None
     configured_release_seconds: float
-    last_relay_command_high: bool | None
+    last_relay_command: RelayCommand | None
     authorization_loaded: bool
     authorization_record_count: int
-    authorization_version: str | None
-    authorization_modified_at: datetime | None
+    authorization_source_revision: str | None
+    authorization_source_modified_at: datetime | None
     last_audit_event_at: datetime | None
     pending_notification_count: int
     application_started_at: datetime
@@ -71,43 +107,65 @@ class StatusService:
     def __init__(
         self,
         *,
-        controller: ControllerSnapshotSource,
-        reader: ReaderSnapshotSource,
+        operational: OperationalSnapshotSource,
         authorization: AuthorizationSnapshotSource,
         audit: AuditStatusSource,
         notifications: NotificationStatusSource,
         clock: Clock,
         software_version: str,
+        application_started_at: datetime,
     ) -> None:
-        self._controller = controller
-        self._reader = reader
+        if application_started_at.tzinfo is None or application_started_at.utcoffset() is None:
+            raise ValueError("application start timestamp must be timezone-aware")
+        self._operational = operational
         self._authorization = authorization
         self._audit = audit
         self._notifications = notifications
-        self._started_at = clock.now()
+        self._clock = clock
+        self._started_at = application_started_at
         self._software_version = software_version
 
     def snapshot(self) -> StatusSnapshot:
-        controller = self._controller.snapshot()
-        reader = self._reader.snapshot()
+        operational = self._operational.snapshot()
+        if operational is None:
+            raise OperationalSnapshotUnavailableError("operational snapshot unavailable")
+        controller = operational.controller
+        reader = operational.reader
         authorization = self._authorization.snapshot()
+        now = self._clock.now()
+        snapshot_age = max(0.0, (now - operational.published_at).total_seconds())
+        deadline_at = (
+            now + timedelta(seconds=controller.release_remaining_seconds)
+            if controller.release_remaining_seconds is not None
+            else None
+        )
         return StatusSnapshot(
             controller_state=controller.state,
             reader_connected=reader.connected,
             reader_health=reader.health_state,
-            last_successful_credential_processing_at=controller.last_credential_processed_at,
-            last_reader_record_age_seconds=reader.last_record_age_seconds,
+            snapshot_published_at=operational.published_at,
+            snapshot_age_seconds=snapshot_age,
+            last_credential_processed_at=controller.last_credential_processed_at,
+            last_reader_record_age_seconds=(
+                max(0.0, (now - operational.last_reader_record_at).total_seconds())
+                if operational.last_reader_record_at is not None
+                else None
+            ),
             release_active=controller.release_active,
-            release_deadline=controller.release_deadline,
+            release_deadline_at=deadline_at,
             release_remaining_seconds=controller.release_remaining_seconds,
             configured_release_seconds=controller.configured_release_seconds,
-            last_relay_command_high=controller.last_relay_command_high,
+            last_relay_command=controller.last_relay_command,
             authorization_loaded=authorization.loaded,
             authorization_record_count=authorization.record_count,
-            authorization_version=authorization.version,
-            authorization_modified_at=authorization.modified_at,
+            authorization_source_revision=authorization.source_revision,
+            authorization_source_modified_at=authorization.source_modified_at,
             last_audit_event_at=self._audit.latest_event_time(),
             pending_notification_count=self._notifications.pending_count(),
             application_started_at=self._started_at,
             software_version=self._software_version,
         )
+
+
+class OperationalSnapshotUnavailableError(RuntimeError):
+    pass

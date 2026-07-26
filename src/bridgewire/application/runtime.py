@@ -5,6 +5,7 @@ from collections.abc import Callable
 from types import MappingProxyType
 
 from bridgewire.application.access_service import AccessService, CredentialSource
+from bridgewire.application.status_service import OperationalSnapshotStore
 from bridgewire.audit import AuditEvent, EventType, Severity
 from bridgewire.interfaces import AuditSink, Clock, HealthReporter, Waiter
 from bridgewire.reader import (
@@ -53,6 +54,7 @@ class BridgewireRuntime:
         maximum_record_bytes: int = 16,
         stop_event: threading.Event | None = None,
         waiter: Waiter | None = None,
+        operational_snapshots: OperationalSnapshotStore | None = None,
     ) -> None:
         self._access = access
         self._reader = reader
@@ -63,6 +65,17 @@ class BridgewireRuntime:
         self._stopped = stop_event or threading.Event()
         self._waiter = waiter or EventWaiter(clock, self._stopped)
         self._shutdown_complete = False
+        self._operational_snapshots = operational_snapshots
+
+    def _publish_snapshot(self) -> None:
+        if self._operational_snapshots is not None:
+            self._operational_snapshots.publish(
+                self._access.snapshot(), self._reader.snapshot(), self._clock.now()
+            )
+
+    def _tick_and_publish(self) -> None:
+        self._access.tick()
+        self._publish_snapshot()
 
     @property
     def shutdown_requested(self) -> bool:
@@ -71,21 +84,25 @@ class BridgewireRuntime:
     def start(self) -> None:
         self._access.start()
         self._health.report("degraded", reason="reader_connecting")
+        self._publish_snapshot()
 
     def run_once(self) -> bool:
         self._access.tick()
-        if not self._reader.connected:
-            if self._reader.connect_until_ready(1):
-                self._health.report("ready", reader="connected")
-                return True
+        try:
+            if not self._reader.connected:
+                if self._reader.connect_until_ready(1):
+                    self._health.report("ready", reader="connected")
+                    return True
+                return False
+            for record in self._reader.read_records_once(self._stream):
+                self._access.submit_record(
+                    record,
+                    source=CredentialSource.PHYSICAL_READER,
+                )
+            self._access.tick()
             return False
-        for record in self._reader.read_records_once(self._stream):
-            self._access.submit_record(
-                record,
-                source=CredentialSource.PHYSICAL_READER,
-            )
-        self._access.tick()
-        return False
+        finally:
+            self._publish_snapshot()
 
     def run(self, *, on_ready: Callable[[], None] | None = None) -> None:
         while not self.shutdown_requested:
@@ -93,7 +110,7 @@ class BridgewireRuntime:
                 on_ready()
 
     def cooperative_wait(self, seconds: float) -> bool:
-        return self._waiter.wait(seconds, self._access.tick)
+        return self._waiter.wait(seconds, self._tick_and_publish)
 
     def request_shutdown(self) -> None:
         self._stopped.set()
@@ -129,6 +146,7 @@ class BridgewireRuntime:
 
     def handle_failure(self) -> None:
         self._access._recoverable_failure()
+        self._publish_snapshot()
 
     def shutdown(self) -> None:
         if self._shutdown_complete:
@@ -145,5 +163,7 @@ class BridgewireRuntime:
             except BaseException as exc:
                 failures.append(exc)
         if failures:
+            self._publish_snapshot()
             raise BaseExceptionGroup("runtime shutdown failed", failures)
         self._shutdown_complete = True
+        self._publish_snapshot()

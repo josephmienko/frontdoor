@@ -7,6 +7,7 @@ from bridgewire.authorization import AuthorizationOutcome
 from bridgewire.controller import (
     AccessController,
     AccessResult,
+    ControllerSnapshot,
     ControllerState,
     PhysicalReleaseStatus,
 )
@@ -53,6 +54,9 @@ class AccessService:
     @property
     def controller_state(self) -> ControllerState:
         return self._controller.state
+
+    def snapshot(self) -> ControllerSnapshot:
+        return self._controller.snapshot()
 
     def start(self) -> None:
         self._controller.start()

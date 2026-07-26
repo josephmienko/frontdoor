@@ -8,6 +8,10 @@ import pytest
 
 from bridgewire.application.access_service import AccessService, CredentialSource
 from bridgewire.application.runtime import BridgewireRuntime
+from bridgewire.application.status_service import (
+    OperationalSnapshot,
+    OperationalSnapshotStore,
+)
 from bridgewire.audit import InMemoryAuditSink
 from bridgewire.authorization import AuthorizationOutcome
 from bridgewire.clock import ManualClock
@@ -346,6 +350,58 @@ def test_reconnect_wait_advances_manual_clock_and_keeps_relock_ticking(
     runtime.shutdown()
 
 
+@pytest.mark.integration
+def test_reconnect_wait_publishes_relock_before_wait_completes(
+    system: tuple[object, ...],
+) -> None:
+    controller, clock, relay, audit, _notifications = system
+    assert isinstance(controller, AccessController)
+    assert isinstance(clock, ManualClock)
+    assert isinstance(relay, SimulatedRelay)
+    assert isinstance(audit, InMemoryAuditSink)
+    runtime: BridgewireRuntime | None = None
+    reader = ReaderSupervisor(
+        identity=ReaderIdentity(by_id_path=Path("/dev/serial/by-id/missing")),
+        enumerate_devices=lambda: [],
+        open_reader=lambda _path: SimulatedReaderSession([]),
+        wait=lambda seconds: runtime.cooperative_wait(seconds) if runtime else False,
+        emit=lambda _event: None,
+        monotonic=clock.monotonic,
+    )
+    published = OperationalSnapshotStore()
+    observed_during_wait: list[OperationalSnapshot] = []
+
+    class InspectingWaiter:
+        def wait(self, _seconds: float, on_interval: Callable[[], None]) -> bool:
+            assert isinstance(clock, ManualClock)
+            clock.advance(3)
+            on_interval()
+            snapshot = published.snapshot()
+            assert snapshot is not None
+            observed_during_wait.append(snapshot)
+            return False
+
+    access = AccessService(controller)
+    runtime = BridgewireRuntime(
+        access=access,
+        reader=reader,
+        health_reporter=RecordingHealthReporter(),
+        audit=audit,
+        clock=clock,
+        waiter=InspectingWaiter(),
+        operational_snapshots=published,
+    )
+    runtime.start()
+    access.submit_credential("0102030405", source=CredentialSource.TEST)
+    published.publish(access.snapshot(), reader.snapshot(), clock.now())
+    assert relay.is_high
+    runtime.run_once()
+    assert not relay.is_high
+    assert observed_during_wait[0].controller.state is ControllerState.READY
+    assert observed_during_wait[0].reader.health_state.value == "degraded"
+    runtime.shutdown()
+
+
 @pytest.mark.unit
 def test_shutdown_interrupts_reconnect_wait_without_advancing_manual_clock(
     system: tuple[object, ...],
@@ -415,6 +471,82 @@ def test_runtime_readiness_callback_occurs_once_per_connection(
     runtime.start()
     runtime.run(on_ready=lambda: callbacks.append("ready"))
     assert callbacks == ["ready"]
+    runtime.shutdown()
+
+
+@pytest.mark.unit
+def test_runtime_publishes_atomic_operational_snapshots(
+    system: tuple[object, ...],
+) -> None:
+    controller, clock, _relay, audit, _notifications = system
+    assert isinstance(controller, AccessController)
+    assert isinstance(clock, ManualClock)
+    assert isinstance(audit, InMemoryAuditSink)
+    stable = Path("/dev/serial/by-id/runtime-reader")
+    reader = ReaderSupervisor(
+        identity=ReaderIdentity(by_id_path=stable),
+        enumerate_devices=lambda: [SerialDevice(Path("/dev/ttyUSB0"), stable)],
+        open_reader=lambda _path: SimulatedReaderSession([]),
+        wait=lambda _seconds: True,
+        emit=lambda _event: None,
+        monotonic=clock.monotonic,
+    )
+    published = OperationalSnapshotStore(
+        OperationalSnapshot(controller.snapshot(), reader.snapshot(), clock.now(), None)
+    )
+    runtime = BridgewireRuntime(
+        access=AccessService(controller),
+        reader=reader,
+        health_reporter=RecordingHealthReporter(),
+        audit=audit,
+        clock=clock,
+        operational_snapshots=published,
+    )
+    runtime.start()
+    snapshot = published.snapshot()
+    assert snapshot is not None
+    assert snapshot.controller.state is ControllerState.READY
+    runtime.run_once()
+    snapshot = published.snapshot()
+    assert snapshot is not None
+    assert snapshot.reader.connected
+    runtime.shutdown()
+    snapshot = published.snapshot()
+    assert snapshot is not None
+    assert snapshot.controller.state is ControllerState.STOPPED
+
+
+@pytest.mark.failure_mode
+def test_runtime_publishes_fault_transition_immediately(
+    system: tuple[object, ...],
+) -> None:
+    controller, clock, _relay, audit, _notifications = system
+    assert isinstance(controller, AccessController)
+    assert isinstance(clock, ManualClock)
+    assert isinstance(audit, InMemoryAuditSink)
+    reader = ReaderSupervisor(
+        identity=ReaderIdentity(by_id_path=Path("/dev/serial/by-id/missing")),
+        enumerate_devices=lambda: [],
+        open_reader=lambda _path: SimulatedReaderSession([]),
+        wait=lambda _seconds: False,
+        emit=lambda _event: None,
+        monotonic=clock.monotonic,
+    )
+    published = OperationalSnapshotStore()
+    runtime = BridgewireRuntime(
+        access=AccessService(controller),
+        reader=reader,
+        health_reporter=RecordingHealthReporter(),
+        audit=audit,
+        clock=clock,
+        operational_snapshots=published,
+    )
+    runtime.start()
+    runtime.handle_failure()
+    snapshot = published.snapshot()
+    assert snapshot is not None
+    assert snapshot.controller.state is ControllerState.FAULTED
+    assert snapshot.reader.health_state.value == "degraded"
     runtime.shutdown()
 
 

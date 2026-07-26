@@ -38,6 +38,15 @@ class RelayConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiConfiguration:
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8080
+    max_event_page_size: int = 100
+    operational_snapshot_stale_after_seconds: float = 10.0
+
+
+@dataclass(frozen=True, slots=True)
 class SystemConfiguration:
     reader_identity: ReaderIdentity
     serial: SerialConfiguration
@@ -45,6 +54,7 @@ class SystemConfiguration:
     backoff: BackoffPolicy
     escalation: EscalationPolicy
     relay: RelayConfiguration
+    api: ApiConfiguration
 
 
 def _table(parent: dict[str, object], name: str) -> dict[str, object]:
@@ -111,6 +121,9 @@ def load_configuration(path: Path) -> SystemConfiguration:
         relay = raw.get("relay", {"backend": "simulated"})
         if not isinstance(relay, dict):
             raise ConfigurationError("relay must be a table")
+        api = raw.get("api", {})
+        if not isinstance(api, dict):
+            raise ConfigurationError("api must be a table")
         by_id_path = _optional_string(reader, "by_id_path")
         identity = ReaderIdentity(
             by_id_path=Path(by_id_path) if by_id_path else None,
@@ -150,6 +163,25 @@ def load_configuration(path: Path) -> SystemConfiguration:
         relay_config = RelayConfiguration(
             backend=_string(cast(dict[str, object], relay), "backend")
         )
+        api_table = cast(dict[str, object], api)
+        api_defaults = ApiConfiguration()
+        api_config = ApiConfiguration(
+            enabled=(
+                _boolean(api_table, "enabled") if "enabled" in api_table else api_defaults.enabled
+            ),
+            host=(_string(api_table, "host").strip() if "host" in api_table else api_defaults.host),
+            port=(_integer(api_table, "port") if "port" in api_table else api_defaults.port),
+            max_event_page_size=(
+                _integer(api_table, "max_event_page_size")
+                if "max_event_page_size" in api_table
+                else api_defaults.max_event_page_size
+            ),
+            operational_snapshot_stale_after_seconds=(
+                _number(api_table, "operational_snapshot_stale_after_seconds")
+                if "operational_snapshot_stale_after_seconds" in api_table
+                else api_defaults.operational_snapshot_stale_after_seconds
+            ),
+        )
     except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
         if isinstance(exc, ConfigurationError):
             raise
@@ -160,6 +192,20 @@ def load_configuration(path: Path) -> SystemConfiguration:
         raise ConfigurationError("GPIO configuration violates the approved GPIO contract")
     if relay_config.backend not in {"simulated", "raspberry_pi"}:
         raise ConfigurationError("relay backend must be simulated or raspberry_pi")
+    if not api_config.host:
+        raise ConfigurationError("api host must not be empty")
+    if not 1 <= api_config.port <= 65535:
+        raise ConfigurationError("api port must be between 1 and 65535")
+    if not 1 <= api_config.max_event_page_size <= 1000:
+        raise ConfigurationError("api maximum event page size must be between 1 and 1000")
+    if api_config.operational_snapshot_stale_after_seconds <= 0:
+        raise ConfigurationError("api snapshot freshness threshold must be positive")
     return SystemConfiguration(
-        identity, serial_config, gpio_config, backoff, escalation_policy, relay_config
+        identity,
+        serial_config,
+        gpio_config,
+        backoff,
+        escalation_policy,
+        relay_config,
+        api_config,
     )

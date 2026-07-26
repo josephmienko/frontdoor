@@ -95,6 +95,58 @@ def test_approved_simulation_configuration(repo_root: Path) -> None:
     assert config.gpio.channel == 23
     assert config.gpio.release_seconds == 3
     assert config.serial.maximum_record_bytes == 16
+    assert not config.api.enabled
+    assert config.api.host == "127.0.0.1"
+    assert config.api.port == 8080
+    assert config.api.max_event_page_size == 100
+    assert config.api.operational_snapshot_stale_after_seconds == 10
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("line", "replacement", "message"),
+    [
+        ('host = "127.0.0.1"', 'host = ""', "host"),
+        ('host = "127.0.0.1"', 'host = "   "', "host"),
+        ("port = 8080", "port = 70000", "port"),
+        ("max_event_page_size = 100", "max_event_page_size = 0", "page"),
+        (
+            "operational_snapshot_stale_after_seconds = 10.0",
+            "operational_snapshot_stale_after_seconds = 0",
+            "freshness",
+        ),
+    ],
+)
+def test_invalid_api_configuration_is_rejected(
+    tmp_path: Path,
+    repo_root: Path,
+    line: str,
+    replacement: str,
+    message: str,
+) -> None:
+    text = (repo_root / "configs" / "simulation.toml").read_text(encoding="utf-8")
+    path = tmp_path / "invalid-api.toml"
+    path.write_text(text.replace(line, replacement), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match=message):
+        load_configuration(path)
+
+
+@pytest.mark.unit
+def test_api_external_host_is_explicit_and_unknown_keys_do_not_enable_api(
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    text = (repo_root / "configs" / "simulation.toml").read_text(encoding="utf-8")
+    path = tmp_path / "api.toml"
+    path.write_text(
+        text.replace('host = "127.0.0.1"', 'host = "0.0.0.0"').replace(
+            "enabled = false", "enabledd = true"
+        ),
+        encoding="utf-8",
+    )
+    config = load_configuration(path)
+    assert config.api.host == "0.0.0.0"
+    assert not config.api.enabled
 
 
 @pytest.mark.unit

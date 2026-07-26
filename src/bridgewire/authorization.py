@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,8 +40,8 @@ class AuthorizationInstallFailure:
 class AuthorizationSnapshot:
     loaded: bool
     record_count: int
-    version: str | None
-    modified_at: datetime | None
+    source_revision: str | None
+    source_modified_at: datetime | None
 
 
 def normalize_key(key: str) -> str:
@@ -91,28 +92,33 @@ class AuthorizationStore:
         self._records: dict[str, AuthorizationRecord] = {}
         self._version: str | None = None
         self._modified_at: datetime | None = None
+        self._lock = threading.RLock()
 
     @property
     def record_count(self) -> int:
-        return len(self._records)
+        with self._lock:
+            return len(self._records)
 
     def reload(self, path: Path) -> None:
         candidate = self._parser.load(path)
         metadata = path.stat()
-        self._records = candidate
-        self._version = f"{metadata.st_mtime_ns}:{metadata.st_size}"
-        self._modified_at = datetime.fromtimestamp(metadata.st_mtime, UTC)
+        with self._lock:
+            self._records = candidate
+            self._version = f"{metadata.st_mtime_ns}:{metadata.st_size}"
+            self._modified_at = datetime.fromtimestamp(metadata.st_mtime, UTC)
 
     def snapshot(self) -> AuthorizationSnapshot:
-        return AuthorizationSnapshot(
-            loaded=self._version is not None,
-            record_count=len(self._records),
-            version=self._version,
-            modified_at=self._modified_at,
-        )
+        with self._lock:
+            return AuthorizationSnapshot(
+                loaded=self._version is not None,
+                record_count=len(self._records),
+                source_revision=self._version,
+                source_modified_at=self._modified_at,
+            )
 
     def classify(self, credential: str) -> AuthorizationOutcome:
-        record = self._records.get(normalize_key(credential))
+        with self._lock:
+            record = self._records.get(normalize_key(credential))
         if record is None:
             return AuthorizationOutcome.UNKNOWN
         if record.allow:

@@ -53,7 +53,7 @@ the project environment, and rerun `poetry install`.
 Bridgewire is a modular monolith: the controller, authorization source, reader,
 relay, audit sink, and notification queue communicate in-process through typed
 ports. The reusable runtime and application boundary are described in
-[architecture refactor through Increment 3](docs/architecture-refactor-increment-3.md).
+[architecture refactor through Increment 4](docs/architecture-refactor-increment-4.md).
 
 The core depends on typed interfaces and an injected monotonic clock. Tests
 never wait in real time. Startup explicitly commands BCM23 LOW before
@@ -76,6 +76,18 @@ it does not configure physical access-control hardware.
 
 The deferred supervised-hardware deployment and validation work is recorded in
 the [after-hours hardware-service checklist](docs/after-hours-hardware-service-checklist.md).
+
+## Read-only API
+
+The optional FastAPI adapter exposes `GET /health`, `GET /status`,
+`GET /events`, and `GET /events/{event_id}`. It has no relay-control,
+credential-injection, or authorization-administration routes. API
+configuration is disabled and bound to `127.0.0.1` by default.
+
+The concurrency and deployment boundaries are documented in the
+[read-only API design](docs/read-only-api.md). This increment provides an
+application factory for testing and future host integration; it does not yet
+run Uvicorn alongside the hardware service.
 
 ## Contributions and releases
 

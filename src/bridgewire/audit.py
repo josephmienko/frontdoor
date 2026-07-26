@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -219,43 +220,51 @@ class DurableNotificationQueue:
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._lock = threading.RLock()
 
     def enqueue(self, event: AuditEvent) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event.as_dict(), sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event.as_dict(), sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
 
     def pending(self) -> list[dict[str, Any]]:
-        if not self._path.exists():
-            return []
-        return [
-            json.loads(line) for line in self._path.read_text(encoding="utf-8").splitlines() if line
-        ]
+        with self._lock:
+            if not self._path.exists():
+                return []
+            return [
+                json.loads(line)
+                for line in self._path.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
 
     def pending_count(self) -> int:
         return len(self.pending())
 
     def mark_delivered(self, event_id: str) -> None:
-        remaining = [event for event in self.pending() if str(event.get("event_id")) != event_id]
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self._path.parent,
-                prefix=f".{self._path.name}.",
-                delete=False,
-            ) as temporary:
-                temporary_path = Path(temporary.name)
-                for event in remaining:
-                    temporary.write(json.dumps(event, sort_keys=True) + "\n")
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.replace(temporary_path, self._path)
-            temporary_path = None
-        finally:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
+        with self._lock:
+            remaining = [
+                event for event in self.pending() if str(event.get("event_id")) != event_id
+            ]
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=self._path.parent,
+                    prefix=f".{self._path.name}.",
+                    delete=False,
+                ) as temporary:
+                    temporary_path = Path(temporary.name)
+                    for event in remaining:
+                        temporary.write(json.dumps(event, sort_keys=True) + "\n")
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                os.replace(temporary_path, self._path)
+                temporary_path = None
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)

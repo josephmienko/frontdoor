@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 authors = [{ name = "Joe Mienko", email = "joseph.mienko@gmail.com" }]
 dependencies = [
+    "fastapi>=0.116,<1",
     "jsonschema>=4.25,<5",
     "RPi.GPIO>=0.7.1,<0.8; platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "uvicorn>=0.35,<1",
 ]
 
 [project.scripts]
@@ -22,6 +24,7 @@ packages = [{ include = "bridgewire", from = "src" }]
 
 [tool.poetry.group.dev.dependencies]
 mypy = "^1.18"
+httpx = "^0.28"
 pytest = "^8.4"
 pytest-cov = "^7.0"
 ruff = "^0.14"

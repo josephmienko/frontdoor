@@ -21,6 +21,12 @@ release_seconds = 3.0
 [relay]
 backend = "raspberry_pi"
 
+[api]
+enabled = false
+host = "127.0.0.1"
+port = 8080
+maximum_event_page_size = 100
+
 [reconnect]
 minimum_seconds = 1.0
 maximum_seconds = 30.0

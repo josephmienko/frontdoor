@@ -95,6 +95,33 @@ def test_approved_simulation_configuration(repo_root: Path) -> None:
     assert config.gpio.channel == 23
     assert config.gpio.release_seconds == 3
     assert config.serial.maximum_record_bytes == 16
+    assert not config.api.enabled
+    assert config.api.host == "127.0.0.1"
+    assert config.api.port == 8080
+    assert config.api.maximum_event_page_size == 100
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("line", "replacement", "message"),
+    [
+        ('host = "127.0.0.1"', 'host = ""', "host"),
+        ("port = 8080", "port = 70000", "port"),
+        ("maximum_event_page_size = 100", "maximum_event_page_size = 0", "page"),
+    ],
+)
+def test_invalid_api_configuration_is_rejected(
+    tmp_path: Path,
+    repo_root: Path,
+    line: str,
+    replacement: str,
+    message: str,
+) -> None:
+    text = (repo_root / "configs" / "simulation.toml").read_text(encoding="utf-8")
+    path = tmp_path / "invalid-api.toml"
+    path.write_text(text.replace(line, replacement), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match=message):
+        load_configuration(path)
 
 
 @pytest.mark.unit

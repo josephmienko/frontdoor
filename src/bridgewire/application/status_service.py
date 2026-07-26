@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
+from threading import Lock
 from typing import Protocol
 
 from bridgewire.authorization import AuthorizationSnapshot
@@ -11,12 +12,30 @@ from bridgewire.interfaces import Clock
 from bridgewire.reader import ReaderHealthState, ReaderSnapshot
 
 
-class ControllerSnapshotSource(Protocol):
-    def snapshot(self) -> ControllerSnapshot: ...
+@dataclass(frozen=True, slots=True)
+class OperationalSnapshot:
+    controller: ControllerSnapshot
+    reader: ReaderSnapshot
 
 
-class ReaderSnapshotSource(Protocol):
-    def snapshot(self) -> ReaderSnapshot: ...
+class OperationalSnapshotSource(Protocol):
+    def snapshot(self) -> OperationalSnapshot: ...
+
+
+class OperationalSnapshotStore:
+    """Thread-safe publication boundary for live controller and reader state."""
+
+    def __init__(self, initial: OperationalSnapshot) -> None:
+        self._snapshot = initial
+        self._lock = Lock()
+
+    def publish(self, controller: ControllerSnapshot, reader: ReaderSnapshot) -> None:
+        with self._lock:
+            self._snapshot = OperationalSnapshot(controller, reader)
+
+    def snapshot(self) -> OperationalSnapshot:
+        with self._lock:
+            return self._snapshot
 
 
 class AuthorizationSnapshotSource(Protocol):
@@ -71,8 +90,7 @@ class StatusService:
     def __init__(
         self,
         *,
-        controller: ControllerSnapshotSource,
-        reader: ReaderSnapshotSource,
+        operational: OperationalSnapshotSource,
         authorization: AuthorizationSnapshotSource,
         audit: AuditStatusSource,
         notifications: NotificationStatusSource,
@@ -82,8 +100,7 @@ class StatusService:
     ) -> None:
         if application_started_at.tzinfo is None or application_started_at.utcoffset() is None:
             raise ValueError("application start timestamp must be timezone-aware")
-        self._controller = controller
-        self._reader = reader
+        self._operational = operational
         self._authorization = authorization
         self._audit = audit
         self._notifications = notifications
@@ -92,8 +109,9 @@ class StatusService:
         self._software_version = software_version
 
     def snapshot(self) -> StatusSnapshot:
-        controller = self._controller.snapshot()
-        reader = self._reader.snapshot()
+        operational = self._operational.snapshot()
+        controller = operational.controller
+        reader = operational.reader
         authorization = self._authorization.snapshot()
         now = self._clock.now()
         deadline_at = (

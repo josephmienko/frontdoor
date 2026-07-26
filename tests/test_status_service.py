@@ -6,7 +6,11 @@ from types import MappingProxyType
 
 import pytest
 
-from bridgewire.application.status_service import StatusService
+from bridgewire.application.status_service import (
+    OperationalSnapshot,
+    OperationalSnapshotStore,
+    StatusService,
+)
 from bridgewire.audit import (
     AuditEvent,
     DurableNotificationQueue,
@@ -50,9 +54,11 @@ def test_status_snapshot_is_stable_serializable_and_uses_public_sources(
         emit=lambda _event: None,
         monotonic=clock.monotonic,
     )
+    operational = OperationalSnapshotStore(
+        OperationalSnapshot(controller.snapshot(), reader.snapshot())
+    )
     service = StatusService(
-        controller=controller,
-        reader=reader,
+        operational=operational,
         authorization=authorization,
         audit=audit,
         notifications=notifications,
@@ -65,6 +71,7 @@ def test_status_snapshot_is_stable_serializable_and_uses_public_sources(
     controller.process(ParsedRecord("0102030405"))
     processed_at = clock.now()
     clock.advance(1.25)
+    operational.publish(controller.snapshot(), reader.snapshot())
 
     snapshot = service.snapshot()
 
@@ -156,8 +163,9 @@ def test_status_before_start_serializes_unavailable_values_and_injected_start_ti
     )
     application_started_at = clock.now() - timedelta(seconds=30)
     snapshot = StatusService(
-        controller=controller,
-        reader=reader,
+        operational=OperationalSnapshotStore(
+            OperationalSnapshot(controller.snapshot(), reader.snapshot())
+        ),
         authorization=authorization,
         audit=audit,
         notifications=notifications,
@@ -251,8 +259,9 @@ def test_status_source_failure_propagates_predictably(
         monotonic=clock.monotonic,
     )
     service = StatusService(
-        controller=controller,
-        reader=reader,
+        operational=OperationalSnapshotStore(
+            OperationalSnapshot(controller.snapshot(), reader.snapshot())
+        ),
         authorization=authorization,
         audit=FailingAudit(),
         notifications=notifications,
@@ -285,8 +294,9 @@ def test_status_service_rejects_ambiguous_application_start_timestamp(
     )
     with pytest.raises(ValueError, match="timezone-aware"):
         StatusService(
-            controller=controller,
-            reader=reader,
+            operational=OperationalSnapshotStore(
+                OperationalSnapshot(controller.snapshot(), reader.snapshot())
+            ),
             authorization=authorization,
             audit=audit,
             notifications=notifications,

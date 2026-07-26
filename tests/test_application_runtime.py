@@ -8,6 +8,10 @@ import pytest
 
 from bridgewire.application.access_service import AccessService, CredentialSource
 from bridgewire.application.runtime import BridgewireRuntime
+from bridgewire.application.status_service import (
+    OperationalSnapshot,
+    OperationalSnapshotStore,
+)
 from bridgewire.audit import InMemoryAuditSink
 from bridgewire.authorization import AuthorizationOutcome
 from bridgewire.clock import ManualClock
@@ -416,6 +420,42 @@ def test_runtime_readiness_callback_occurs_once_per_connection(
     runtime.run(on_ready=lambda: callbacks.append("ready"))
     assert callbacks == ["ready"]
     runtime.shutdown()
+
+
+@pytest.mark.unit
+def test_runtime_publishes_atomic_operational_snapshots(
+    system: tuple[object, ...],
+) -> None:
+    controller, clock, _relay, audit, _notifications = system
+    assert isinstance(controller, AccessController)
+    assert isinstance(clock, ManualClock)
+    assert isinstance(audit, InMemoryAuditSink)
+    stable = Path("/dev/serial/by-id/runtime-reader")
+    reader = ReaderSupervisor(
+        identity=ReaderIdentity(by_id_path=stable),
+        enumerate_devices=lambda: [SerialDevice(Path("/dev/ttyUSB0"), stable)],
+        open_reader=lambda _path: SimulatedReaderSession([]),
+        wait=lambda _seconds: True,
+        emit=lambda _event: None,
+        monotonic=clock.monotonic,
+    )
+    published = OperationalSnapshotStore(
+        OperationalSnapshot(controller.snapshot(), reader.snapshot())
+    )
+    runtime = BridgewireRuntime(
+        access=AccessService(controller),
+        reader=reader,
+        health_reporter=RecordingHealthReporter(),
+        audit=audit,
+        clock=clock,
+        operational_snapshots=published,
+    )
+    runtime.start()
+    assert published.snapshot().controller.state is ControllerState.READY
+    runtime.run_once()
+    assert published.snapshot().reader.connected
+    runtime.shutdown()
+    assert published.snapshot().controller.state is ControllerState.STOPPED
 
 
 @pytest.mark.failure_mode

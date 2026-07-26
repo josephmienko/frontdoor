@@ -28,6 +28,11 @@ class PhysicalReleaseStatus(StrEnum):
     ACTUATION_FAILED = "actuation_failed"
 
 
+class RelayCommand(StrEnum):
+    RELEASED = "released"
+    SECURED = "secured"
+
+
 @dataclass(frozen=True, slots=True)
 class AccessResult:
     authorization: AuthorizationOutcome | None
@@ -38,10 +43,10 @@ class AccessResult:
 class ControllerSnapshot:
     state: ControllerState
     release_active: bool
-    release_deadline: float | None
+    release_deadline_monotonic: float | None
     release_remaining_seconds: float | None
     configured_release_seconds: float
-    last_relay_command_high: bool | None
+    last_relay_command: RelayCommand | None
     last_credential_processed_at: datetime | None
 
 
@@ -82,10 +87,16 @@ class AccessController:
         return ControllerSnapshot(
             state=self.state,
             release_active=self.state is ControllerState.RELEASED,
-            release_deadline=self.release_deadline,
+            release_deadline_monotonic=self.release_deadline,
             release_remaining_seconds=remaining,
             configured_release_seconds=self._release_seconds,
-            last_relay_command_high=self._last_relay_command_high,
+            last_relay_command=(
+                RelayCommand.RELEASED
+                if self._last_relay_command_high is True
+                else RelayCommand.SECURED
+                if self._last_relay_command_high is False
+                else None
+            ),
             last_credential_processed_at=self._last_credential_processed_at,
         )
 

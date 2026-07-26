@@ -60,9 +60,23 @@ reported because the current audit boundary does not return one.
 public snapshot methods and narrow query protocols. It reports controller and
 reader state, release timing and the last relay command, credential-processing
 and reader-record telemetry, authorization load metadata, the latest audit
-time, pending notification count, application start time, and software
-version. It exposes no credential records, filesystem paths, relay controls, or
-private implementation fields. It has no FastAPI or Pydantic dependency.
+time, pending notification count, an explicitly injected application start
+time, and software version. The controller retains its monotonic deadline for
+internal correctness; the public status contract exposes remaining seconds and
+an estimated UTC `release_deadline_at`. It exposes no credential records,
+filesystem paths, relay controls, or private implementation fields. It has no
+FastAPI or Pydantic dependency.
+
+The authorization `version` is a source-metadata revision derived from file
+modification time and size. It is useful for change detection but is not a
+content hash or cryptographic identity.
+
+Before a concurrent HTTP adapter is introduced, operational status will move
+to a runtime-published cached immutable snapshot. Audit/event reads will use
+independent read-only persistence connections, and notification persistence
+will receive an equivalent safe read boundary. FastAPI will not directly query
+the runtime's SQLite connection or assemble live controller and reader state
+across threads.
 
 The hardware host remains responsible for dependency construction, signal
 registration, guaranteed `finally` cleanup, and closing durable persistence. On

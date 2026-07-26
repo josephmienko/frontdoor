@@ -5,6 +5,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TextIO, cast
@@ -32,6 +33,14 @@ class AuthorizationRecord:
 @dataclass(frozen=True, slots=True)
 class AuthorizationInstallFailure:
     stage: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationSnapshot:
+    loaded: bool
+    record_count: int
+    version: str | None
+    modified_at: datetime | None
 
 
 def normalize_key(key: str) -> str:
@@ -80,6 +89,8 @@ class AuthorizationStore:
     def __init__(self, parser: AuthorizationFile) -> None:
         self._parser = parser
         self._records: dict[str, AuthorizationRecord] = {}
+        self._version: str | None = None
+        self._modified_at: datetime | None = None
 
     @property
     def record_count(self) -> int:
@@ -87,7 +98,18 @@ class AuthorizationStore:
 
     def reload(self, path: Path) -> None:
         candidate = self._parser.load(path)
+        metadata = path.stat()
         self._records = candidate
+        self._version = f"{metadata.st_mtime_ns}:{metadata.st_size}"
+        self._modified_at = datetime.fromtimestamp(metadata.st_mtime, UTC)
+
+    def snapshot(self) -> AuthorizationSnapshot:
+        return AuthorizationSnapshot(
+            loaded=self._version is not None,
+            record_count=len(self._records),
+            version=self._version,
+            modified_at=self._modified_at,
+        )
 
     def classify(self, credential: str) -> AuthorizationOutcome:
         record = self._records.get(normalize_key(credential))

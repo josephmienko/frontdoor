@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 
@@ -33,6 +34,17 @@ class AccessResult:
     physical_release: PhysicalReleaseStatus
 
 
+@dataclass(frozen=True, slots=True)
+class ControllerSnapshot:
+    state: ControllerState
+    release_active: bool
+    release_deadline: float | None
+    release_remaining_seconds: float | None
+    configured_release_seconds: float
+    last_relay_command_high: bool | None
+    last_credential_processed_at: datetime | None
+
+
 class AccessController:
     def __init__(
         self,
@@ -58,6 +70,24 @@ class AccessController:
         self._gpio_channel = gpio_channel
         self.state = ControllerState.INITIALIZING
         self.release_deadline: float | None = None
+        self._last_relay_command_high: bool | None = None
+        self._last_credential_processed_at: datetime | None = None
+
+    def snapshot(self) -> ControllerSnapshot:
+        remaining = (
+            max(0.0, self.release_deadline - self._clock.monotonic())
+            if self.release_deadline is not None
+            else None
+        )
+        return ControllerSnapshot(
+            state=self.state,
+            release_active=self.state is ControllerState.RELEASED,
+            release_deadline=self.release_deadline,
+            release_remaining_seconds=remaining,
+            configured_release_seconds=self._release_seconds,
+            last_relay_command_high=self._last_relay_command_high,
+            last_credential_processed_at=self._last_credential_processed_at,
+        )
 
     def start(self) -> None:
         if self.state is ControllerState.READY or self.state is ControllerState.RELEASED:
@@ -74,6 +104,7 @@ class AccessController:
             raise
         try:
             self._relay.command(False)
+            self._last_relay_command_high = False
         except Exception:
             self.state = ControllerState.FAULTED
             self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL, {"reason": "low_failed"})
@@ -111,6 +142,7 @@ class AccessController:
 
     def _process_parsed(self, record: ParsedRecord) -> AccessResult:
         outcome = self._authorization.classify(record.credential)
+        self._last_credential_processed_at = self._clock.now()
         if outcome is AuthorizationOutcome.DENIED:
             self._audit(EventType.CREDENTIAL_DENIED, Severity.WARNING)
             self._record_suspicious()
@@ -124,6 +156,7 @@ class AccessController:
             return AccessResult(outcome, PhysicalReleaseStatus.ALREADY_RELEASED)
         try:
             self._relay.command(True)
+            self._last_relay_command_high = True
         except Exception:
             self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL, {"reason": "high_failed"})
             self._attempt_safe_state()
@@ -146,6 +179,7 @@ class AccessController:
         ):
             try:
                 self._relay.command(False)
+                self._last_relay_command_high = False
             except Exception:
                 self.state = ControllerState.FAULTED
                 self._audit(
@@ -189,6 +223,7 @@ class AccessController:
     def _attempt_safe_state(self) -> bool:
         try:
             self._relay.command(False)
+            self._last_relay_command_high = False
         except Exception:
             self._audit(EventType.RELAY_CONTROL_ERROR, Severity.CRITICAL, {"reason": "low_failed"})
             return False

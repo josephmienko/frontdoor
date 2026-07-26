@@ -1,8 +1,8 @@
-# Architecture refactor through Increment 3
+# Architecture refactor through Increment 4
 
-This first review stops after runtime extraction and the application-service
-boundary. FastAPI, status/query services, and broad domain/package relocation
-are deliberately deferred.
+Increment 4 adds a framework-independent status read model to the hardened
+runtime and application-service boundary. FastAPI and broad domain/package
+relocation remain deliberately deferred.
 
 ## Baseline
 
@@ -31,6 +31,11 @@ flowchart LR
     Runtime --> Access[AccessService]
     Runtime --> Reader[ReaderSupervisor]
     Access --> Controller[AccessController]
+    Status[StatusService] --> Controller
+    Status --> Reader
+    Status --> Auth
+    Status --> Audit
+    Status --> Notify
     Controller --> Auth[AuthorizationSource]
     Controller --> Relay[Relay]
     Controller --> Audit[AuditSink]
@@ -50,6 +55,14 @@ and escalation path. The immutable result separates `authorized`,
 `relay_actuation_requested`, `relay_actuation_succeeded`, and `source`.
 Authorization does not imply successful physical release. No audit event ID is
 reported because the current audit boundary does not return one.
+
+`StatusService` builds an immutable, serializable point-in-time view using only
+public snapshot methods and narrow query protocols. It reports controller and
+reader state, release timing and the last relay command, credential-processing
+and reader-record telemetry, authorization load metadata, the latest audit
+time, pending notification count, application start time, and software
+version. It exposes no credential records, filesystem paths, relay controls, or
+private implementation fields. It has no FastAPI or Pydantic dependency.
 
 The hardware host remains responsible for dependency construction, signal
 registration, guaranteed `finally` cleanup, and closing durable persistence. On
@@ -117,7 +130,6 @@ solve.
 
 ## Deferred
 
-- Increment 4 status/read models
 - Broader ports and adapters package relocation
 - FastAPI and Uvicorn
 - HTTP endpoints of any kind

@@ -226,6 +226,13 @@ class ReaderDisconnectedError(OSError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class ReaderSnapshot:
+    connected: bool
+    health_state: ReaderHealthState
+    last_record_age_seconds: float | None
+
+
 class ReaderSupervisor:
     def __init__(
         self,
@@ -267,6 +274,13 @@ class ReaderSupervisor:
         if self._last_record_at is None or self._monotonic is None:
             return None
         return self._monotonic() - self._last_record_at
+
+    def snapshot(self) -> ReaderSnapshot:
+        return ReaderSnapshot(
+            connected=self.connected,
+            health_state=self.health_state,
+            last_record_age_seconds=self.last_record_age,
+        )
 
     def connect_until_ready(self, maximum_attempts: int) -> bool:
         attempts_this_call = 0

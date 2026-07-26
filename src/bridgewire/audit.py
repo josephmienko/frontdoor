@@ -120,6 +120,9 @@ class InMemoryAuditSink:
     def append(self, event: AuditEvent) -> None:
         self.events.append(event)
 
+    def latest_event_time(self) -> datetime | None:
+        return self.events[-1].timestamp if self.events else None
+
 
 class SQLiteAuditSink:
     """Transactional durable event repository with privacy-preserving payloads."""
@@ -169,6 +172,12 @@ class SQLiteAuditSink:
         assert row is not None
         return int(row[0])
 
+    def latest_event_time(self) -> datetime | None:
+        row = self._connection.execute(
+            "SELECT timestamp FROM audit_events ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+        return datetime.fromisoformat(str(row[0])) if row is not None else None
+
     def close(self) -> None:
         self._connection.close()
 
@@ -179,6 +188,9 @@ class InMemoryNotificationQueue:
 
     def enqueue(self, event: AuditEvent) -> None:
         self.events.append(event)
+
+    def pending_count(self) -> int:
+        return len(self.events)
 
 
 class NotificationEndpoint(Protocol):
@@ -221,6 +233,9 @@ class DurableNotificationQueue:
         return [
             json.loads(line) for line in self._path.read_text(encoding="utf-8").splitlines() if line
         ]
+
+    def pending_count(self) -> int:
+        return len(self.pending())
 
     def mark_delivered(self, event_id: str) -> None:
         remaining = [event for event in self.pending() if str(event.get("event_id")) != event_id]

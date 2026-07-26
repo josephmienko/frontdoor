@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -29,6 +31,7 @@ from bridgewire.reader import (
     ReaderEvent,
     ReaderHealthState,
     ReaderIdentity,
+    ReaderSnapshot,
     ReaderSupervisor,
     SerialDevice,
 )
@@ -55,7 +58,7 @@ def test_status_snapshot_is_stable_serializable_and_uses_public_sources(
         monotonic=clock.monotonic,
     )
     operational = OperationalSnapshotStore(
-        OperationalSnapshot(controller.snapshot(), reader.snapshot())
+        OperationalSnapshot(controller.snapshot(), reader.snapshot(), clock.now(), None)
     )
     service = StatusService(
         operational=operational,
@@ -71,12 +74,15 @@ def test_status_snapshot_is_stable_serializable_and_uses_public_sources(
     controller.process(ParsedRecord("0102030405"))
     processed_at = clock.now()
     clock.advance(1.25)
-    operational.publish(controller.snapshot(), reader.snapshot())
+    operational.publish(controller.snapshot(), reader.snapshot(), clock.now())
 
     snapshot = service.snapshot()
 
     assert snapshot.controller_state is ControllerState.RELEASED
     assert snapshot.reader_health is ReaderHealthState.DEGRADED
+    assert snapshot.snapshot_published_at == clock.now()
+    assert snapshot.snapshot_published_at.utcoffset() == timedelta(0)
+    assert snapshot.snapshot_age_seconds == 0
     assert snapshot.release_active
     assert snapshot.release_remaining_seconds == pytest.approx(1.75)
     assert snapshot.configured_release_seconds == 3
@@ -85,8 +91,8 @@ def test_status_snapshot_is_stable_serializable_and_uses_public_sources(
     assert snapshot.release_deadline_at == clock.now() + timedelta(seconds=1.75)
     assert snapshot.authorization_loaded
     assert snapshot.authorization_record_count == authorization.record_count
-    assert snapshot.authorization_version is not None
-    assert snapshot.authorization_modified_at is not None
+    assert snapshot.authorization_source_revision is not None
+    assert snapshot.authorization_source_modified_at is not None
     assert snapshot.last_audit_event_at == audit.events[-1].timestamp
     assert snapshot.pending_notification_count == 0
     assert snapshot.software_version == "9.8.7"
@@ -94,6 +100,80 @@ def test_status_snapshot_is_stable_serializable_and_uses_public_sources(
     assert payload["controller_state"] == "released"
     assert payload["reader_health"] == "degraded"
     assert payload["application_started_at"] == started_at.isoformat()
+
+
+@pytest.mark.unit
+def test_reader_record_age_increases_without_republication(
+    system: tuple[object, ...],
+    authorization: AuthorizationStore,
+) -> None:
+    controller, clock, _relay, audit, notifications = system
+    assert isinstance(controller, AccessController)
+    assert isinstance(clock, ManualClock)
+    assert isinstance(audit, InMemoryAuditSink)
+    assert isinstance(notifications, InMemoryNotificationQueue)
+    stable = Path("/dev/serial/by-id/status-reader")
+    reader = ReaderSupervisor(
+        identity=ReaderIdentity(by_id_path=stable),
+        enumerate_devices=lambda: [SerialDevice(Path("/dev/ttyUSB0"), stable)],
+        open_reader=lambda _path: SimulatedReaderSession([b"record"]),
+        wait=lambda _seconds: True,
+        emit=lambda _event: None,
+        monotonic=clock.monotonic,
+    )
+    assert reader.connect_until_ready(1)
+    reader.read_once()
+    operational = OperationalSnapshotStore()
+    operational.publish(controller.snapshot(), reader.snapshot(), clock.now())
+    service = StatusService(
+        operational=operational,
+        authorization=authorization,
+        audit=audit,
+        notifications=notifications,
+        clock=clock,
+        software_version="1.3.0",
+        application_started_at=clock.now(),
+    )
+    assert service.snapshot().last_reader_record_age_seconds == 0
+    clock.advance(4)
+    assert service.snapshot().last_reader_record_age_seconds == 4
+    assert service.snapshot().snapshot_age_seconds == 4
+
+
+@pytest.mark.unit
+def test_operational_snapshot_store_never_exposes_torn_pairs(
+    system: tuple[object, ...],
+) -> None:
+    controller, clock, _relay, _audit, _notifications = system
+    assert isinstance(controller, AccessController)
+    assert isinstance(clock, ManualClock)
+    controller_snapshot = controller.snapshot()
+    reader_a = ReaderSnapshot(False, ReaderHealthState.DEGRADED, None)
+    reader_b = ReaderSnapshot(True, ReaderHealthState.READY, None)
+    controller_a = replace(controller_snapshot, state=ControllerState.INITIALIZING)
+    controller_b = replace(controller_snapshot, state=ControllerState.READY)
+    store = OperationalSnapshotStore()
+    finished = threading.Event()
+    observed: set[tuple[ControllerState, ReaderHealthState]] = set()
+
+    def publish() -> None:
+        for _ in range(500):
+            store.publish(controller_a, reader_a, clock.now())
+            store.publish(controller_b, reader_b, clock.now())
+        finished.set()
+
+    worker = threading.Thread(target=publish)
+    worker.start()
+    while not finished.is_set():
+        snapshot = store.snapshot()
+        if snapshot is not None:
+            observed.add((snapshot.controller.state, snapshot.reader.health_state))
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert observed <= {
+        (ControllerState.INITIALIZING, ReaderHealthState.DEGRADED),
+        (ControllerState.READY, ReaderHealthState.READY),
+    }
 
 
 @pytest.mark.unit
@@ -164,7 +244,7 @@ def test_status_before_start_serializes_unavailable_values_and_injected_start_ti
     application_started_at = clock.now() - timedelta(seconds=30)
     snapshot = StatusService(
         operational=OperationalSnapshotStore(
-            OperationalSnapshot(controller.snapshot(), reader.snapshot())
+            OperationalSnapshot(controller.snapshot(), reader.snapshot(), clock.now(), None)
         ),
         authorization=authorization,
         audit=audit,
@@ -177,8 +257,8 @@ def test_status_before_start_serializes_unavailable_values_and_injected_start_ti
     assert snapshot.controller_state is ControllerState.INITIALIZING
     assert not snapshot.authorization_loaded
     assert snapshot.authorization_record_count == 0
-    assert snapshot.authorization_version is None
-    assert snapshot.authorization_modified_at is None
+    assert snapshot.authorization_source_revision is None
+    assert snapshot.authorization_source_modified_at is None
     assert snapshot.last_audit_event_at is None
     assert snapshot.last_credential_processed_at is None
     assert snapshot.release_deadline_at is None
@@ -188,8 +268,8 @@ def test_status_before_start_serializes_unavailable_values_and_injected_start_ti
     assert all(
         payload[field] is None
         for field in (
-            "authorization_version",
-            "authorization_modified_at",
+            "authorization_source_revision",
+            "authorization_source_modified_at",
             "last_audit_event_at",
             "last_credential_processed_at",
             "release_deadline_at",
@@ -260,7 +340,7 @@ def test_status_source_failure_propagates_predictably(
     )
     service = StatusService(
         operational=OperationalSnapshotStore(
-            OperationalSnapshot(controller.snapshot(), reader.snapshot())
+            OperationalSnapshot(controller.snapshot(), reader.snapshot(), clock.now(), None)
         ),
         authorization=authorization,
         audit=FailingAudit(),
@@ -295,7 +375,7 @@ def test_status_service_rejects_ambiguous_application_start_timestamp(
     with pytest.raises(ValueError, match="timezone-aware"):
         StatusService(
             operational=OperationalSnapshotStore(
-                OperationalSnapshot(controller.snapshot(), reader.snapshot())
+                OperationalSnapshot(controller.snapshot(), reader.snapshot(), clock.now(), None)
             ),
             authorization=authorization,
             audit=audit,

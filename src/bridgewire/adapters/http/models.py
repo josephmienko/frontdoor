@@ -15,14 +15,17 @@ class HttpModel(BaseModel):
 
 class HealthResponse(HttpModel):
     status: str
-    controller_state: ControllerState
-    reader_health: ReaderHealthState
+    controller_state: ControllerState | None
+    reader_health: ReaderHealthState | None
+    operational_snapshot_stale: bool
 
 
 class StatusResponse(HttpModel):
     controller_state: ControllerState
     reader_connected: bool
     reader_health: ReaderHealthState
+    snapshot_published_at: datetime
+    snapshot_age_seconds: float
     last_credential_processed_at: datetime | None
     last_reader_record_age_seconds: float | None
     release_active: bool
@@ -32,8 +35,8 @@ class StatusResponse(HttpModel):
     last_relay_command: RelayCommand | None
     authorization_loaded: bool
     authorization_record_count: int
-    authorization_version: str | None
-    authorization_modified_at: datetime | None
+    authorization_source_revision: str | None
+    authorization_source_modified_at: datetime | None
     last_audit_event_at: datetime | None
     pending_notification_count: int
     application_started_at: datetime
@@ -52,4 +55,5 @@ class EventResponse(HttpModel):
 
 
 class EventPageResponse(HttpModel):
-    events: list[EventResponse]
+    items: list[EventResponse]
+    next_cursor: str | None

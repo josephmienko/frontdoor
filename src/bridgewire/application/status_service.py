@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from threading import Lock
 from typing import Protocol
@@ -16,24 +16,39 @@ from bridgewire.reader import ReaderHealthState, ReaderSnapshot
 class OperationalSnapshot:
     controller: ControllerSnapshot
     reader: ReaderSnapshot
+    published_at: datetime
+    last_reader_record_at: datetime | None
 
 
 class OperationalSnapshotSource(Protocol):
-    def snapshot(self) -> OperationalSnapshot: ...
+    def snapshot(self) -> OperationalSnapshot | None: ...
 
 
 class OperationalSnapshotStore:
     """Thread-safe publication boundary for live controller and reader state."""
 
-    def __init__(self, initial: OperationalSnapshot) -> None:
+    def __init__(self, initial: OperationalSnapshot | None = None) -> None:
         self._snapshot = initial
         self._lock = Lock()
 
-    def publish(self, controller: ControllerSnapshot, reader: ReaderSnapshot) -> None:
+    def publish(
+        self,
+        controller: ControllerSnapshot,
+        reader: ReaderSnapshot,
+        published_at: datetime,
+    ) -> None:
+        if published_at.tzinfo is None or published_at.utcoffset() is None:
+            raise ValueError("snapshot publication timestamp must be timezone-aware")
+        normalized = published_at.astimezone(UTC)
+        last_record_at = (
+            normalized - timedelta(seconds=reader.last_record_age_seconds)
+            if reader.last_record_age_seconds is not None
+            else None
+        )
         with self._lock:
-            self._snapshot = OperationalSnapshot(controller, reader)
+            self._snapshot = OperationalSnapshot(controller, reader, normalized, last_record_at)
 
-    def snapshot(self) -> OperationalSnapshot:
+    def snapshot(self) -> OperationalSnapshot | None:
         with self._lock:
             return self._snapshot
 
@@ -55,6 +70,8 @@ class StatusSnapshot:
     controller_state: ControllerState
     reader_connected: bool
     reader_health: ReaderHealthState
+    snapshot_published_at: datetime
+    snapshot_age_seconds: float
     last_credential_processed_at: datetime | None
     last_reader_record_age_seconds: float | None
     release_active: bool
@@ -64,8 +81,8 @@ class StatusSnapshot:
     last_relay_command: RelayCommand | None
     authorization_loaded: bool
     authorization_record_count: int
-    authorization_version: str | None
-    authorization_modified_at: datetime | None
+    authorization_source_revision: str | None
+    authorization_source_modified_at: datetime | None
     last_audit_event_at: datetime | None
     pending_notification_count: int
     application_started_at: datetime
@@ -110,10 +127,13 @@ class StatusService:
 
     def snapshot(self) -> StatusSnapshot:
         operational = self._operational.snapshot()
+        if operational is None:
+            raise OperationalSnapshotUnavailableError("operational snapshot unavailable")
         controller = operational.controller
         reader = operational.reader
         authorization = self._authorization.snapshot()
         now = self._clock.now()
+        snapshot_age = max(0.0, (now - operational.published_at).total_seconds())
         deadline_at = (
             now + timedelta(seconds=controller.release_remaining_seconds)
             if controller.release_remaining_seconds is not None
@@ -123,8 +143,14 @@ class StatusService:
             controller_state=controller.state,
             reader_connected=reader.connected,
             reader_health=reader.health_state,
+            snapshot_published_at=operational.published_at,
+            snapshot_age_seconds=snapshot_age,
             last_credential_processed_at=controller.last_credential_processed_at,
-            last_reader_record_age_seconds=reader.last_record_age_seconds,
+            last_reader_record_age_seconds=(
+                max(0.0, (now - operational.last_reader_record_at).total_seconds())
+                if operational.last_reader_record_at is not None
+                else None
+            ),
             release_active=controller.release_active,
             release_deadline_at=deadline_at,
             release_remaining_seconds=controller.release_remaining_seconds,
@@ -132,10 +158,14 @@ class StatusService:
             last_relay_command=controller.last_relay_command,
             authorization_loaded=authorization.loaded,
             authorization_record_count=authorization.record_count,
-            authorization_version=authorization.version,
-            authorization_modified_at=authorization.modified_at,
+            authorization_source_revision=authorization.source_revision,
+            authorization_source_modified_at=authorization.source_modified_at,
             last_audit_event_at=self._audit.latest_event_time(),
             pending_notification_count=self._notifications.pending_count(),
             application_started_at=self._started_at,
             software_version=self._software_version,
         )
+
+
+class OperationalSnapshotUnavailableError(RuntimeError):
+    pass

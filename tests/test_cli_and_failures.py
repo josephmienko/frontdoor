@@ -233,3 +233,44 @@ def test_controller_rejects_credentials_before_safe_start(
 
         controller.process(ParsedRecord("0102030405"))
     assert controller.state is ControllerState.INITIALIZING
+
+
+@pytest.mark.unit
+def test_notification_queue_concurrent_append_and_count_is_thread_safe(
+    tmp_path: Path,
+) -> None:
+    queue = DurableNotificationQueue(tmp_path / "notifications.jsonl")
+    failures: list[BaseException] = []
+
+    def write() -> None:
+        try:
+            for index in range(25):
+                queue.enqueue(
+                    AuditEvent(
+                        EventType.ESCALATION_CRITICAL,
+                        Severity.CRITICAL,
+                        datetime.now(UTC),
+                        event_id=f"00000000-0000-0000-0000-{index:012d}",
+                    )
+                )
+        except BaseException as exc:
+            failures.append(exc)
+
+    def read() -> None:
+        try:
+            for _ in range(100):
+                queue.pending_count()
+                queue.pending()
+        except BaseException as exc:
+            failures.append(exc)
+
+    writer = threading.Thread(target=write)
+    reader = threading.Thread(target=read)
+    writer.start()
+    reader.start()
+    writer.join(timeout=5)
+    reader.join(timeout=5)
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert failures == []
+    assert queue.pending_count() == 25

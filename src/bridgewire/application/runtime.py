@@ -69,7 +69,13 @@ class BridgewireRuntime:
 
     def _publish_snapshot(self) -> None:
         if self._operational_snapshots is not None:
-            self._operational_snapshots.publish(self._access.snapshot(), self._reader.snapshot())
+            self._operational_snapshots.publish(
+                self._access.snapshot(), self._reader.snapshot(), self._clock.now()
+            )
+
+    def _tick_and_publish(self) -> None:
+        self._access.tick()
+        self._publish_snapshot()
 
     @property
     def shutdown_requested(self) -> bool:
@@ -104,7 +110,7 @@ class BridgewireRuntime:
                 on_ready()
 
     def cooperative_wait(self, seconds: float) -> bool:
-        return self._waiter.wait(seconds, self._access.tick)
+        return self._waiter.wait(seconds, self._tick_and_publish)
 
     def request_shutdown(self) -> None:
         self._stopped.set()
@@ -140,6 +146,7 @@ class BridgewireRuntime:
 
     def handle_failure(self) -> None:
         self._access._recoverable_failure()
+        self._publish_snapshot()
 
     def shutdown(self) -> None:
         if self._shutdown_complete:

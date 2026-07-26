@@ -23,7 +23,8 @@ backend = "simulated"
 enabled = false
 host = "127.0.0.1"
 port = 8080
-maximum_event_page_size = 100
+max_event_page_size = 100
+operational_snapshot_stale_after_seconds = 10.0
 
 [reconnect]
 minimum_seconds = 1.0

@@ -45,11 +45,54 @@ A non-loopback host must be an explicit configuration change
 and requires deployment-layer access control because HTTP authentication and
 TLS termination are outside this increment.
 
-This increment provides the application factory and query boundary. It does
-not yet add a production API process or combine Uvicorn with the hardware
-runtime; coordinated host lifecycle belongs to the next host-integration
-increment. Tests instantiate the factory with simulated adapters using
-FastAPI's test client.
+When `[api].enabled = true`, the existing hardware host constructs one shared
+application container and starts Uvicorn in an isolated daemon thread. The
+hardware runtime remains on the main thread and remains the sole owner of
+signals, relay state, and GPIO cleanup. API startup failure is retained but
+does not prevent the local reader/runtime loop from running.
+
+The API adapter is single-use and reports these explicit lifecycle states:
+`new`, `starting`, `running`, `start_failed`, `start_timed_out`, `failed`,
+`stopping`, `stopped`, and `stop_timed_out`. Construction, startup, runtime,
+and shutdown failures are logged immediately, retained for final aggregation,
+and written to file health as API degradation without including exception
+text. The main loop performs a non-blocking state observation once per existing
+runtime iteration; it never joins or waits for HTTP work while processing
+reader/controller events.
+
+Coordinated shutdown is deliberately safety-first:
+
+1. the hardware runtime shuts down and commands the relay LOW;
+2. the hardware host independently retries final relay cleanup;
+3. Uvicorn receives its bounded shutdown request;
+4. durable audit persistence closes.
+
+An API shutdown timeout is reported only after the relay-secure attempts.
+Uvicorn never owns or invokes GPIO cleanup. No separate API command, background
+control worker, or systemd unit is introduced.
+
+Startup waits at most two seconds for Uvicorn readiness. If readiness fails,
+the initial cleanup join can take up to five additional seconds. The
+worst-case bounded delay before reader processing is therefore approximately
+seven seconds. The relay has already been secured before this optional API
+attempt, and an API failure cannot terminate access control. Shutdown joins
+for at most five seconds. Server adapter instances cannot be restarted; a
+process-level restart constructs a new container and adapter.
+
+The API thread is daemonized only as a last-resort bounded-exit escape hatch.
+Graceful shutdown and a bounded join are always attempted. If a thread remains
+alive, that state and failure are retained; interpreter exit may terminate
+in-flight HTTP responses abruptly, but relay LOW and the host's direct GPIO
+cleanup have already been attempted. Audit closure remains independent.
+
+Authentication and TLS are not implemented. Loopback remains the default,
+control routes remain unsupported, and systemd/deployment integration is
+explicitly deferred.
+
+File-health output gained additive `api` and `access_control` fields. Existing
+JSON consumers that tolerate unknown fields remain compatible; consumers that
+reject unknown fields may require adjustment. The file-health schema is not
+currently formally versioned.
 
 Audit reads use a one-second SQLite busy timeout. Expected database
 availability failures become a sanitized `503`; SQL, exception text, and paths

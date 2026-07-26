@@ -104,10 +104,17 @@ class BridgewireRuntime:
         finally:
             self._publish_snapshot()
 
-    def run(self, *, on_ready: Callable[[], None] | None = None) -> None:
+    def run(
+        self,
+        *,
+        on_ready: Callable[[], None] | None = None,
+        on_iteration: Callable[[], None] | None = None,
+    ) -> None:
         while not self.shutdown_requested:
             if self.run_once() and on_ready is not None:
                 on_ready()
+            if on_iteration is not None:
+                on_iteration()
 
     def cooperative_wait(self, seconds: float) -> bool:
         return self._waiter.wait(seconds, self._tick_and_publish)
